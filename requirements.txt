@@ -4,14 +4,22 @@
 #
 #    pip-compile
 #
+bcrypt==4.3.0
+    # via paramiko
 bidict==0.23.1
     # via python-socketio
 blinker==1.9.0
     # via flask
 brotli==1.1.0
     # via flask-compress
+cffi==2.0.0
+    # via
+    #   cryptography
+    #   pynacl
 click==8.2.1
     # via flask
+cryptography==46.0.1
+    # via paramiko
 dnspython==2.7.0
     # via eventlet
 eventlet==0.40.1
@@ -28,6 +36,8 @@ greenlet==3.2.3
     # via eventlet
 h11==0.16.0
     # via wsproto
+invoke==2.2.0
+    # via paramiko
 itsdangerous==2.2.0
     # via flask
 jinja2==3.1.6
@@ -37,10 +47,16 @@ markupsafe==3.0.2
     #   flask
     #   jinja2
     #   werkzeug
+paramiko==4.0.0
+    # via -r requirements.in
+pycparser==2.23
+    # via cffi
 pygdbmi==0.10.0.2
     # via -r requirements.in
 pygments==2.19.2
     # via -r requirements.in
+pynacl==1.6.0
+    # via paramiko
 python-engineio==4.12.2
     # via python-socketio
 python-socketio==5.13.0

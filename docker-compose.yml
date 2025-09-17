@@ -1,0 +1,13 @@
+services:
+  debian:
+    container_name: DebugAssist
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "2222:22"
+    tty: true
+    user: "root"
+    stdin_open: true
+    volumes:
+      - ./volumes/storage:/app

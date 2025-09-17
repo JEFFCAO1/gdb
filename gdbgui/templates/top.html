@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>top 调试工具</title>
+  <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}" />
+</head>
+<body class="w-screen h-screen bg-gray-100 flex flex-col items-center justify-center">
+  <h1 class="text-3xl font-bold mb-8">top 调试工具</h1>
+  <p>这里是 top 工具的专属页面，后续可集成具体功能。</p>
+
+  <form action="/top/upload" method="post" enctype="multipart/form-data" class="flex flex-col items-center space-y-4 mt-8">
+    <label class="block text-lg font-medium">上传文件：</label>
+    <input type="file" name="file" class="block" required />
+    <button type="submit" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded">上传</button>
+  </form>
+  <a href="/" class="mt-8 bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">返回工具集</a>
+</body>
+</html>

@@ -1,3 +1,4 @@
+import werkzeug
 import json
 import logging
 import os
@@ -27,6 +28,40 @@ from .http_util import (
 logger = logging.getLogger(__file__)
 blueprint = Blueprint("http_routes", __name__, template_folder=str(TEMPLATE_DIR))
 
+# strace 工具页面
+@blueprint.route("/strace", methods=["GET"])
+@authenticate
+def strace_page():
+    add_csrf_token_to_session()
+    return render_template("strace.html")
+
+# top 工具页面
+@blueprint.route("/top", methods=["GET"])
+@authenticate
+def top_page():
+    add_csrf_token_to_session()
+    return render_template("top.html")
+
+# top 工具页面
+@blueprint.route("/perfetto", methods=["GET"])
+@authenticate
+def perfetto_page():
+    add_csrf_token_to_session()
+    return render_template("top.html")
+
+# top 工具文件上传
+@blueprint.route("/top/upload", methods=["POST"])
+@authenticate
+def top_upload():
+    if 'file' not in request.files:
+        return "未选择文件", 400
+    file = request.files['file']
+    if file.filename == '':
+        return "未选择文件", 400
+    # 可自定义保存路径
+    save_path = os.path.join(current_app.config.get("UPLOAD_FOLDER", "/tmp"), werkzeug.utils.secure_filename(file.filename))
+    file.save(save_path)
+    return f"文件已上传到: {save_path}", 200
 
 @blueprint.route("/read_file", methods=["GET"])
 @csrf_protect
@@ -126,28 +161,20 @@ def help_route():
     return redirect("https://github.com/cs01/gdbgui/blob/master/HELP.md")
 
 
-@blueprint.route("/dashboard", methods=["GET"])
-@authenticate
-def dashboard():
-    manager = current_app.config.get("_manager")
 
-    add_csrf_token_to_session()
 
-    """display a dashboard with a list of all running gdb processes
-    and ability to kill them, or open a new tab to work with that
-    GdbController instance"""
-    return render_template(
-        "dashboard.html",
-        gdbgui_sessions=manager.get_dashboard_data(),
-        csrf_token=session["csrf_token"],
-        default_command=current_app.config["gdb_command"],
-    )
 
 
 @blueprint.route("/", methods=["GET"])
 @authenticate
+def tools():
+    add_csrf_token_to_session()
+    return render_template("toolstabs.html")
+
+
+@blueprint.route("/gdb", methods=["GET"])
+@authenticate
 def gdbgui():
-    """Render the main gdbgui interface"""
     gdbpid = request.args.get("gdbpid", 0)
     gdb_command = request.args.get("gdb_command", current_app.config["gdb_command"])
     add_csrf_token_to_session()

@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en" class="text-gray-900 antialiased leading-tight font-sans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>调试工具集 - gdbgui</title>
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}" />
+  </head>
+  <body class="w-screen h-screen bg-gray-100 flex flex-col items-center justify-center">
+    <h1 class="text-3xl font-bold mb-8">调试工具集</h1>
+    <div class="flex flex-col space-y-4 w-96">
+      <a href="/gdb" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-4 px-4 rounded text-center">GDB</a>
+  <a href="/strace" class="bg-gray-200 hover:bg-gray-400 text-blue-700 font-bold py-4 px-4 rounded text-center">Strace</a>
+  <a href="/top" class="bg-gray-200 hover:bg-gray-400 text-blue-700 font-bold py-4 px-4 rounded text-center">Top</a>
+    </div>
+  <!-- 按钮已改为页面跳转，无需脚本 -->
+  </body>
+</html>

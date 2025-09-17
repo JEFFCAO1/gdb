@@ -2,7 +2,16 @@ import binascii
 import logging
 import os
 from typing import Dict, List
+import socket
 import traceback
+from dataclasses import dataclass, field
+from threading import Event, Lock
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+try:
+    import paramiko
+except ImportError:  # pragma: no cover - exercised when optional dep missing
+    paramiko = None  # type: ignore[assignment]
 from flask import Flask, abort, request, session
 from flask_compress import Compress  # type: ignore
 from flask_socketio import SocketIO, emit  # type: ignore
@@ -13,6 +22,17 @@ from .http_util import is_cross_origin
 from .sessionmanager import SessionManager, DebugSession
 
 logger = logging.getLogger(__file__)
+PARAMIKO_AVAILABLE = paramiko is not None
+
+if not PARAMIKO_AVAILABLE:
+    logger.warning(
+        "Paramiko is not installed. SSH console functionality will be disabled."
+    )
+
+if TYPE_CHECKING:
+    from paramiko import SSHClient as ParamikoSSHClient
+else:
+    ParamikoSSHClient = Any
 # Create flask application and add some configuration keys to be used in various callbacks
 app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
 Compress(
@@ -29,6 +49,27 @@ manager = SessionManager()
 app.config["_manager"] = manager
 app.secret_key = binascii.hexlify(os.urandom(24)).decode("utf-8")
 socketio = SocketIO(manage_session=False)
+
+@dataclass
+class SshSession:
+    client: ParamikoSSHClient
+    command_lock: Lock = field(default_factory=Lock)
+
+
+ssh_clients: Dict[str, SshSession] = {}
+ssh_clients_lock = Lock()
+
+
+@dataclass
+class PendingSshConnection:
+    client: ParamikoSSHClient
+    cancel_event: Event
+    message_sent: bool = False
+
+
+pending_ssh_connections: Dict[str, PendingSshConnection] = {}
+pending_ssh_connections_lock = Lock()
+
 
 
 @app.before_request
@@ -128,6 +169,46 @@ def client_connected():
         )
         logger.info("Created background thread to read gdb responses")
 
+def _emit_to_client(event: str, payload: Dict[str, Any], client_id: str) -> None:
+    socketio.emit(
+        event,
+        payload,
+        namespace="/gdb_listener",
+        room=client_id,
+    )
+
+
+def cancel_pending_connection(client_id: str) -> Optional[PendingSshConnection]:
+    with pending_ssh_connections_lock:
+        pending = pending_ssh_connections.pop(client_id, None)
+    if pending is None:
+        return None
+
+    pending.cancel_event.set()
+    try:
+        pending.client.close()
+    except Exception:
+        logger.debug(
+            "Failed to close pending ssh client for %s", client_id, exc_info=True
+        )
+    return pending
+
+
+def close_ssh_connection(client_id: str, message: Optional[str] = None) -> None:
+    with ssh_clients_lock:
+        session = ssh_clients.pop(client_id, None)
+
+    connection_closed = session is not None
+    ssh_client = session.client if session else None
+    if connection_closed and ssh_client is not None:
+        try:
+            ssh_client.close()
+        except Exception:
+            logger.exception("Failed to close ssh client for %s", client_id)
+    if message and connection_closed:
+        _emit_to_client("ssh_disconnected", {"message": message}, client_id)
+
+
 
 @socketio.on("pty_interaction", namespace="/gdb_listener")
 def pty_interaction(message):
@@ -191,6 +272,240 @@ def run_gdb_command(message: Dict[str, str]):
             emit("error_running_gdb_command", {"message": err})
     else:
         emit("error_running_gdb_command", {"message": "gdb is not running"})
+        
+@socketio.on("ssh_connect", namespace="/gdb_listener")
+def ssh_connect(message: Dict[str, Optional[str]]):
+    client_id = request.sid
+    host = (message.get("host") or "").strip()
+    username = (message.get("username") or "").strip()
+    password = message.get("password") or None
+
+    if not PARAMIKO_AVAILABLE:
+        emit(
+            "ssh_connection_event",
+            {
+                "ok": False,
+                "message": "服务器缺少 Paramiko 依赖，无法建立 SSH 连接。请先安装 paramiko。",
+            },
+        )
+        return
+    try:
+        port = int(message.get("port", 22) or 22)
+    except (TypeError, ValueError):
+        emit(
+            "ssh_connection_event",
+            {"ok": False, "message": "提供的端口号无效。"},
+        )
+        return
+
+    if not host or not username:
+        emit(
+            "ssh_connection_event",
+            {"ok": False, "message": "主机地址和用户名是建立连接所必需的。"},
+        )
+        return
+
+    previous_pending = cancel_pending_connection(client_id)
+    if previous_pending is not None:
+        previous_pending.message_sent = True
+    close_ssh_connection(client_id)
+
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    pending = PendingSshConnection(client=ssh_client, cancel_event=Event())
+    with pending_ssh_connections_lock:
+        pending_ssh_connections[client_id] = pending
+
+    def establish_connection() -> None:
+        try:
+            ssh_client.connect(
+                hostname=host,
+                port=port,
+                username=username,
+                password=password,
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=10,
+                banner_timeout=10,
+                auth_timeout=10,
+            )
+            if pending.cancel_event.is_set():
+                logger.info(
+                    "SSH connection attempt for %s was cancelled after connecting", client_id
+                )
+                try:
+                    ssh_client.close()
+                except Exception:
+                    logger.debug(
+                        "Failed to close ssh client after cancellation for %s",
+                        client_id,
+                        exc_info=True,
+                    )
+                if not pending.message_sent:
+                    _emit_to_client(
+                        "ssh_connection_event",
+                        {"ok": False, "message": "连接请求已取消。"},
+                        client_id,
+                    )
+                    pending.message_sent = True
+                return
+
+            with ssh_clients_lock:
+                ssh_clients[client_id] = SshSession(client=ssh_client)
+            _emit_to_client(
+                "ssh_connection_event",
+                {
+                    "ok": True,
+                    "message": f"已连接到 {username}@{host}:{port}",
+                },
+                client_id,
+            )
+            logger.info(
+                "SSH client %s connected to %s@%s:%s", client_id, username, host, port
+            )
+        except Exception as exc:
+            try:
+                ssh_client.close()
+            except Exception:
+                logger.debug(
+                    "Failed to close ssh client after exception for %s",
+                    client_id,
+                    exc_info=True,
+                )
+
+            if pending.cancel_event.is_set():
+                logger.info("SSH connection attempt for %s was cancelled", client_id)
+                if not pending.message_sent:
+                    _emit_to_client(
+                        "ssh_connection_event",
+                        {"ok": False, "message": "连接请求已取消。"},
+                        client_id,
+                    )
+                    pending.message_sent = True
+            else:
+                logger.exception(
+                    "Failed to connect ssh client %s to %s@%s:%s",
+                    client_id,
+                    username,
+                    host,
+                    port,
+                )
+                _emit_to_client(
+                    "ssh_connection_event",
+                    {"ok": False, "message": f"连接失败: {exc}"},
+                    client_id,
+                )
+        finally:
+            with pending_ssh_connections_lock:
+                pending_ssh_connections.pop(client_id, None)
+
+    socketio.start_background_task(establish_connection)
+
+
+@socketio.on("ssh_command", namespace="/gdb_listener")
+def ssh_command(message: Dict[str, Optional[str]]):
+    client_id = request.sid
+    command = (message.get("command") or "").strip()
+    if not command:
+        emit(
+            "ssh_output",
+            {"ok": False, "message": "未提供要执行的命令。"},
+        )
+        return
+
+    if not PARAMIKO_AVAILABLE:
+        emit(
+            "ssh_output",
+            {
+                "ok": False,
+                "message": "服务器未启用 SSH 支持。请安装 paramiko 后重试。",
+                "command": command,
+            },
+        )
+        return
+
+    with ssh_clients_lock:
+        session = ssh_clients.get(client_id)
+
+    if session is None:
+        emit(
+            "ssh_output",
+            {"ok": False, "message": "尚未建立 SSH 连接。", "command": command},
+        )
+        return
+
+    stdout = None
+    stderr = None
+    try:
+        with session.command_lock:
+            stdin, stdout, stderr = session.client.exec_command(
+                command, get_pty=True, timeout=30
+            )
+            stdin.close()
+            output = stdout.read().decode("utf-8", errors="ignore")
+            error_output = stderr.read().decode("utf-8", errors="ignore")
+    except socket.timeout:
+        emit(
+            "ssh_output",
+            {
+                "ok": False,
+                "message": "命令执行超时。",
+                "command": command,
+            },
+        )
+        return
+    except Exception as exc:
+        emit(
+            "ssh_output",
+            {
+                "ok": False,
+                "message": f"执行命令失败: {exc}",
+                "command": command,
+            },
+        )
+        return
+
+    finally:
+        if stdout is not None:
+            try:
+                stdout.close()
+            except Exception:
+                logger.debug("Failed to close stdout for ssh command", exc_info=True)
+        if stderr is not None:
+            try:
+                stderr.close()
+            except Exception:
+                logger.debug("Failed to close stderr for ssh command", exc_info=True)
+
+    emit(
+        "ssh_output",
+        {
+            "ok": True,
+            "output": output,
+            "error_output": error_output,
+            "command": command,
+        },
+    )
+
+
+@socketio.on("ssh_disconnect", namespace="/gdb_listener")
+def ssh_disconnect():
+    client_id = request.sid
+    pending = cancel_pending_connection(client_id)
+    if pending is not None:
+        if not pending.message_sent:
+            _emit_to_client(
+                "ssh_connection_event",
+                {"ok": False, "message": "连接请求已取消。"},
+                client_id,
+            )
+            pending.message_sent = True
+        return
+
+    close_ssh_connection(client_id, message="SSH 连接已断开。")
+
+
 
 
 def send_msg_to_clients(client_ids, msg, error=False):
@@ -213,6 +528,10 @@ def send_msg_to_clients(client_ids, msg, error=False):
 def client_disconnected():
     """do nothing if client disconnects"""
     manager.disconnect_client(request.sid)
+    pending = cancel_pending_connection(request.sid)
+    if pending is not None:
+        pending.message_sent = True
+    close_ssh_connection(request.sid)
     logger.info("Client websocket disconnected, id %s" % (request.sid))
 
 

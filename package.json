@@ -28,7 +28,7 @@
     "@types/socket.io": "^2.1.11",
     "@types/socket.io-client": "^1.4.33",
     "autoprefixer": "^9.8.5",
-    "cross-env": "^7.0.2",
+    "cross-env": "^7.0.3",
     "css-loader": "^3.6.0",
     "fork-ts-checker-webpack-plugin": "^1.0.0",
     "jest": "^24.3.1",
