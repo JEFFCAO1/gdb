@@ -4,6 +4,7 @@
  */
 
 import React from "react";
+import { store } from "statorgfc";
 
 import Breakpoints from "./Breakpoints";
 import constants from "./constants";
@@ -161,6 +162,12 @@ class Collapser extends React.Component<{}, CollapserState> {
 }
 
 class RightSidebar extends React.Component {
+  constructor() {
+    // @ts-expect-error ts-migrate(2554) FIXME: Expected 1-2 arguments, but got 0.
+    super();
+    this.collectRightSidebarContents = this.collectRightSidebarContents.bind(this);
+  }
+
   render() {
     let input_style = {
         display: "inline",
@@ -258,8 +265,107 @@ class RightSidebar extends React.Component {
       </div>
     );
   }
+
+  collectRightSidebarContents() {
+    const payload: any = {
+      threads: [],
+      locals: [],
+      expressions: [],
+      memory: {},
+      breakpoints: [],
+      registers: {},
+      stack: [],
+      currentThreadId: null,
+      selectedFrameNum: null
+    };
+
+    try {
+      // Import the store to access data
+      const { store } = require("statorgfc");
+
+      // Collect threads and stack information
+      payload.threads = store.get("threads") || [];
+      payload.stack = store.get("stack") || [];
+      payload.currentThreadId = store.get("current_thread_id");
+      payload.selectedFrameNum = store.get("selected_frame_num");
+
+      // Collect locals
+      const locals = store.get("locals") || [];
+      payload.locals = locals.map((local: any) => ({
+        name: local.name,
+        value: local.value,
+        type: local.type,
+        canBeExpanded: local.can_be_expanded
+      }));
+
+      // Collect expressions
+      const expressions = store.get("expressions") || [];
+      payload.expressions = expressions
+        .filter((expr: any) => expr.expr_type === "expr")
+        .map((expr: any) => ({
+          expression: expr.expression,
+          value: expr.value,
+          type: expr.type,
+          name: expr.name
+        }));
+
+      // Collect memory information
+      payload.memory = {
+        cache: store.get("memory_cache") || {},
+        startAddr: store.get("start_addr"),
+        endAddr: store.get("end_addr"),
+        bytesPerLine: store.get("bytes_per_line")
+      };
+
+      // Collect breakpoints
+      const breakpoints = store.get("breakpoints") || [];
+      payload.breakpoints = breakpoints.map((bp: any) => ({
+        number: bp.number,
+        enabled: bp.enabled,
+        line: bp.line,
+        fullname: bp.fullname_to_display,
+        condition: bp.cond,
+        timesHit: bp.times
+      }));
+
+      // Collect registers
+      payload.registers = {
+        names: store.get("register_names") || [],
+        currentValues: store.get("current_register_values") || {},
+        previousValues: store.get("previous_register_values") || {}
+      };
+
+    } catch (e) {
+      console.error("[RightSidebar] Error collecting sidebar contents:", e);
+    }
+
+    // Console log (debug)
+    console.log("[RightSidebar] Collected right sidebar contents", payload);
+
+    // Send to parent (chat box) if embedded in iframe
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: "rightSidebarContents", payload }, "*");
+      }
+    } catch (e) {
+      // ignore cross-origin issues
+    }
+
+    return payload;
+  }
+
   componentDidMount() {
     Tree.init();
+    
+    // Expose the collect function globally for external access
+    (window as any).collectRightSidebarContents = this.collectRightSidebarContents.bind(this);
+
+    // Listen for messages from parent window
+    window.addEventListener('message', (event) => {
+      if (event.data.type === 'collectRightSidebarContents') {
+        this.collectRightSidebarContents();
+      }
+    });
   }
 }
 export default RightSidebar;

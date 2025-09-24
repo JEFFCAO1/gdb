@@ -43,6 +43,9 @@ export class Terminals extends React.Component {
   userPtyRef: React.RefObject<any>;
   programPtyRef: React.RefObject<any>;
   gdbguiPtyRef: React.RefObject<any>;
+  userPty: Terminal | null = null;
+  programPty: Terminal | null = null;
+  gdbguiPty: Terminal | null = null;
   constructor(props: any) {
     super(props);
     this.userPtyRef = React.createRef();
@@ -71,6 +74,113 @@ export class Terminals extends React.Component {
     );
   }
 
+  collectAllPtyContents() {
+    const grab = (pty: Terminal | null): string => {
+      if (!pty || !pty.buffer || !pty.buffer.active) return "";
+      const lines: string[] = [];
+      for (let i = 0; i < pty.buffer.active.length; i++) {
+        lines.push(pty.buffer.active.getLine(i)?.translateToString() ?? "");
+      }
+      // Trim trailing blank lines for cleanliness
+      while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+      return lines.join("\n");
+    };
+
+    // Collect terminal contents as structured data
+    const terminalContents = {
+      gdbOutput: grab(this.userPty),
+      programOutput: grab(this.programPty),
+      gdbLog: grab(this.gdbguiPty)
+    };
+
+    // Collect source code contents if available
+    let sourceCodeData = null;
+    try {
+      if ((window as any).collectSourceCodeContents) {
+        sourceCodeData = (window as any).collectSourceCodeContents();
+      }
+    } catch (e) {
+      console.warn("[Terminals] Could not collect source code contents:", e);
+    }
+
+    // Collect right sidebar contents if available
+    let rightSidebarData = null;
+    try {
+      if ((window as any).collectRightSidebarContents) {
+        rightSidebarData = (window as any).collectRightSidebarContents();
+      }
+    } catch (e) {
+      console.warn("[Terminals] Could not collect right sidebar contents:", e);
+    }
+
+    // Structure the debug context according to predefined format
+    const structuredDebugContext = {
+      CurCode: "",
+      ProcessInfo: "",
+      ProgramOutput: terminalContents.programOutput || "",
+      GDBOutput: terminalContents.gdbOutput || "",
+      GDBLog: terminalContents.gdbLog || ""
+    };
+
+    // Add source code if available
+    if (sourceCodeData && sourceCodeData.sourceLines) {
+      structuredDebugContext.CurCode = sourceCodeData.sourceLines.join('\n');
+    }
+
+    // Add process info from sidebar data
+    if (rightSidebarData) {
+      const processInfoParts = [];
+      
+      if (rightSidebarData.currentThreadId !== null) {
+        processInfoParts.push(`Current Thread: ${rightSidebarData.currentThreadId}`);
+      }
+      
+      if (rightSidebarData.selectedFrameNum !== null) {
+        processInfoParts.push(`Selected Frame: ${rightSidebarData.selectedFrameNum}`);
+      }
+
+      if (rightSidebarData.locals && rightSidebarData.locals.length > 0) {
+        processInfoParts.push("Local Variables:");
+        rightSidebarData.locals.forEach((local: any) => {
+          processInfoParts.push(`  ${local.name}: ${local.value} (${local.type})`);
+        });
+      }
+
+      if (rightSidebarData.expressions && rightSidebarData.expressions.length > 0) {
+        processInfoParts.push("Expressions:");
+        rightSidebarData.expressions.forEach((expr: any) => {
+          processInfoParts.push(`  ${expr.expression}: ${expr.value}`);
+        });
+      }
+
+      if (rightSidebarData.breakpoints && rightSidebarData.breakpoints.length > 0) {
+        processInfoParts.push("Breakpoints:");
+        rightSidebarData.breakpoints.forEach((bp: any) => {
+          processInfoParts.push(`  ${bp.fullname}:${bp.line} (${bp.enabled ? 'enabled' : 'disabled'})`);
+        });
+      }
+
+      structuredDebugContext.ProcessInfo = processInfoParts.join('\n');
+    }
+
+    // Console log (debug)
+    console.log("[Terminals] Collected structured debug context", structuredDebugContext);
+
+    // Send structured data to parent (chat box) if embedded in iframe
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ 
+          type: "structuredDebugContext", 
+          payload: structuredDebugContext 
+        }, "*");
+      }
+    } catch (e) {
+      // ignore cross-origin issues
+    }
+
+    return structuredDebugContext;
+  }
+
   componentDidMount() {
     const fitAddon = new FitAddon();
     const programFitAddon = new FitAddon();
@@ -81,6 +191,7 @@ export class Terminals extends React.Component {
       macOptionIsMeta: true,
       scrollback: 9999
     });
+    this.userPty = userPty;
     userPty.loadAddon(fitAddon);
     userPty.open(this.userPtyRef.current);
     userPty.writeln(`running command: ${store.get("gdb_command")}`);
@@ -111,6 +222,7 @@ export class Terminals extends React.Component {
       macOptionIsMeta: true,
       scrollback: 9999
     });
+    this.programPty = programPty;
     programPty.loadAddon(programFitAddon);
     programPty.open(this.programPtyRef.current);
     programPty.attachCustomKeyEventHandler(
@@ -144,6 +256,7 @@ export class Terminals extends React.Component {
       disableStdin: true
       // theme: { background: "#888" }
     });
+    this.gdbguiPty = gdbguiPty;
     gdbguiPty.write(constants.xtermColors.grey);
     gdbguiPty.writeln("gdbgui output (read-only)");
     gdbguiPty.writeln(
@@ -194,5 +307,21 @@ export class Terminals extends React.Component {
       programFitAddon.fit();
       gdbguiFitAddon.fit();
     }, 0);
+
+    // Expose the collect function globally for external access
+    (window as any).collectPtyContents = this.collectAllPtyContents.bind(this);
+
+    // Listen for messages from parent window
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'collectPty') {
+        this.collectAllPtyContents();
+      }
+    });
+    // Notify parent frame we're ready
+    try {
+      window.parent && window.parent !== window && window.parent.postMessage({ type: 'gdbguiReady' }, '*');
+    } catch (e) {
+      // ignore
+    }
   }
 }

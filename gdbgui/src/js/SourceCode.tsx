@@ -49,6 +49,7 @@ class SourceCode extends React.Component<{}, State> {
     this._get_assm_row = this._get_assm_row.bind(this);
     this.click_gutter = this.click_gutter.bind(this);
     this.is_gdb_paused_on_this_line = this.is_gdb_paused_on_this_line.bind(this);
+    this.collectSourceCodeContents = this.collectSourceCodeContents.bind(this);
   }
 
   render() {
@@ -63,6 +64,18 @@ class SourceCode extends React.Component<{}, State> {
         </table>
       </div>
     );
+  }
+
+  componentDidMount() {
+    // Expose the collect function globally for external access
+    (window as any).collectSourceCodeContents = this.collectSourceCodeContents.bind(this);
+
+    // Listen for messages from parent window
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'collectSourceCode') {
+        this.collectSourceCodeContents();
+      }
+    });
   }
 
   componentDidUpdate() {
@@ -524,6 +537,105 @@ class SourceCode extends React.Component<{}, State> {
     } else {
       return false;
     }
+  }
+
+  collectSourceCodeContents() {
+    const payload: any = {
+      filename: this.state.fullname_to_render || "(no file)",
+      sourceCodeState: this.state.source_code_state,
+      sourceLines: [],
+      assemblyLines: [],
+      currentLine: null,
+      breakpoints: [],
+      sourceCode: "" // Clean source code without line numbers
+    };
+
+    // Get current file info if available
+    if (this.state.paused_on_frame) {
+      payload.currentLine = parseInt(this.state.paused_on_frame.line);
+    }
+
+    // Get breakpoints for current file
+    if (this.state.fullname_to_render) {
+      payload.breakpoints = Breakpoints.get_breakpoint_lines_for_file(this.state.fullname_to_render);
+    }
+
+    // Extract source code content based on current state
+    const states = constants.source_code_states;
+    switch (this.state.source_code_state) {
+      case states.SOURCE_CACHED:
+      case states.ASSM_AND_SOURCE_CACHED: {
+        let obj = FileOps.get_source_file_obj_from_cache(this.state.fullname_to_render);
+        if (obj && obj.source_code_obj) {
+          // Convert source_code_obj (which is indexed by line number) to clean arrays
+          const sourceLines: string[] = [];
+          const sourceCodeLines: string[] = [];
+          const lineNumbers = Object.keys(obj.source_code_obj)
+            .map(n => parseInt(n))
+            .sort((a, b) => a - b);
+          
+          for (const lineNum of lineNumbers) {
+            // Remove HTML tags and decode entities for cleaner text
+            const lineContent = obj.source_code_obj[lineNum]
+              .replace(/<[^>]*>/g, '') // Remove HTML tags
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&amp;/g, '&')
+              .replace(/&quot;/g, '"');
+            
+            sourceLines.push(`${lineNum}: ${lineContent}`);
+            sourceCodeLines.push(lineContent); // Clean source without line numbers
+          }
+          
+          payload.sourceLines = sourceLines;
+          payload.sourceCode = sourceCodeLines.join('\n');
+
+          // Also get assembly if available
+          if (obj.assembly) {
+            const assemblyLines: string[] = [];
+            for (const [lineNum, asmArray] of Object.entries(obj.assembly)) {
+              if (Array.isArray(asmArray)) {
+                for (const asm of asmArray) {
+                  assemblyLines.push(`Line ${lineNum}: ${asm.address} ${asm.inst} ${asm.opcodes || ''}`);
+                }
+              }
+            }
+            payload.assemblyLines = assemblyLines;
+          }
+        }
+        break;
+      }
+      case states.ASSM_CACHED: {
+        const asmArray = this.state.disassembly_for_missing_file;
+        if (Array.isArray(asmArray)) {
+          const assemblyLines: string[] = [];
+          for (const asm of asmArray) {
+            assemblyLines.push(`${asm.address}: ${asm.inst} ${asm.opcodes || ''}`);
+          }
+          payload.assemblyLines = assemblyLines;
+        }
+        break;
+      }
+      case states.FILE_MISSING:
+        payload.sourceLines = [`File not found: ${this.state.fullname_to_render}`];
+        payload.sourceCode = `File not found: ${this.state.fullname_to_render}`;
+        break;
+      case states.FETCHING_SOURCE:
+        payload.sourceLines = ["Fetching source, please wait..."];
+        payload.sourceCode = "Fetching source, please wait...";
+        break;
+      case states.FETCHING_ASSM:
+        payload.assemblyLines = ["Fetching assembly, please wait..."];
+        break;
+      default:
+        payload.sourceLines = ["No source code available"];
+        payload.sourceCode = "No source code available";
+    }
+
+    // Console log (debug)
+    console.log("[SourceCode] Collected source code contents", payload);
+
+    return payload;
   }
 }
 

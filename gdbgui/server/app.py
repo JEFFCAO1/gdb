@@ -1,9 +1,8 @@
 import binascii
 import logging
 import os
-from typing import Dict, List
 import socket
-import traceback
+from typing import Dict, List
 from dataclasses import dataclass, field
 from threading import Event, Lock
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -12,6 +11,8 @@ try:
     import paramiko
 except ImportError:  # pragma: no cover - exercised when optional dep missing
     paramiko = None  # type: ignore[assignment]
+
+import traceback
 from flask import Flask, abort, request, session
 from flask_compress import Compress  # type: ignore
 from flask_socketio import SocketIO, emit  # type: ignore
@@ -22,6 +23,7 @@ from .http_util import is_cross_origin
 from .sessionmanager import SessionManager, DebugSession
 
 logger = logging.getLogger(__file__)
+# Create flask application and add some configuration keys to be used in various callbacks
 PARAMIKO_AVAILABLE = paramiko is not None
 
 if not PARAMIKO_AVAILABLE:
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
     from paramiko import SSHClient as ParamikoSSHClient
 else:
     ParamikoSSHClient = Any
-# Create flask application and add some configuration keys to be used in various callbacks
+
 app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
 Compress(
     app
@@ -49,6 +51,7 @@ manager = SessionManager()
 app.config["_manager"] = manager
 app.secret_key = binascii.hexlify(os.urandom(24)).decode("utf-8")
 socketio = SocketIO(manage_session=False)
+
 
 @dataclass
 class SshSession:
@@ -71,11 +74,13 @@ pending_ssh_connections: Dict[str, PendingSshConnection] = {}
 pending_ssh_connections_lock = Lock()
 
 
-
 @app.before_request
 def csrf_protect_all_post_and_cross_origin_requests():
     """returns None upon success"""
     success = None
+    wlist = {"/api/chat", "/api/GDBAssist"}
+    if request.path in wlist:
+        return success
     if is_cross_origin(request):
         logger.warning("Received cross origin request. Aborting")
         abort(403)
@@ -90,6 +95,44 @@ def csrf_protect_all_post_and_cross_origin_requests():
         else:
             logger.warning("Received invalid csrf token. Aborting")
             abort(403)
+def _emit_to_client(event: str, payload: Dict[str, Any], client_id: str) -> None:
+    socketio.emit(
+        event,
+        payload,
+        namespace="/gdb_listener",
+        room=client_id,
+    )
+
+
+def cancel_pending_connection(client_id: str) -> Optional[PendingSshConnection]:
+    with pending_ssh_connections_lock:
+        pending = pending_ssh_connections.pop(client_id, None)
+    if pending is None:
+        return None
+
+    pending.cancel_event.set()
+    try:
+        pending.client.close()
+    except Exception:
+        logger.debug(
+            "Failed to close pending ssh client for %s", client_id, exc_info=True
+        )
+    return pending
+
+
+def close_ssh_connection(client_id: str, message: Optional[str] = None) -> None:
+    with ssh_clients_lock:
+        session = ssh_clients.pop(client_id, None)
+
+    connection_closed = session is not None
+    ssh_client = session.client if session else None
+    if connection_closed and ssh_client is not None:
+        try:
+            ssh_client.close()
+        except Exception:
+            logger.exception("Failed to close ssh client for %s", client_id)
+    if message and connection_closed:
+        _emit_to_client("ssh_disconnected", {"message": message}, client_id)
 
 
 @socketio.on("connect", namespace="/gdb_listener")
@@ -169,46 +212,6 @@ def client_connected():
         )
         logger.info("Created background thread to read gdb responses")
 
-def _emit_to_client(event: str, payload: Dict[str, Any], client_id: str) -> None:
-    socketio.emit(
-        event,
-        payload,
-        namespace="/gdb_listener",
-        room=client_id,
-    )
-
-
-def cancel_pending_connection(client_id: str) -> Optional[PendingSshConnection]:
-    with pending_ssh_connections_lock:
-        pending = pending_ssh_connections.pop(client_id, None)
-    if pending is None:
-        return None
-
-    pending.cancel_event.set()
-    try:
-        pending.client.close()
-    except Exception:
-        logger.debug(
-            "Failed to close pending ssh client for %s", client_id, exc_info=True
-        )
-    return pending
-
-
-def close_ssh_connection(client_id: str, message: Optional[str] = None) -> None:
-    with ssh_clients_lock:
-        session = ssh_clients.pop(client_id, None)
-
-    connection_closed = session is not None
-    ssh_client = session.client if session else None
-    if connection_closed and ssh_client is not None:
-        try:
-            ssh_client.close()
-        except Exception:
-            logger.exception("Failed to close ssh client for %s", client_id)
-    if message and connection_closed:
-        _emit_to_client("ssh_disconnected", {"message": message}, client_id)
-
-
 
 @socketio.on("pty_interaction", namespace="/gdb_listener")
 def pty_interaction(message):
@@ -272,7 +275,8 @@ def run_gdb_command(message: Dict[str, str]):
             emit("error_running_gdb_command", {"message": err})
     else:
         emit("error_running_gdb_command", {"message": "gdb is not running"})
-        
+
+
 @socketio.on("ssh_connect", namespace="/gdb_listener")
 def ssh_connect(message: Dict[str, Optional[str]]):
     client_id = request.sid
@@ -507,7 +511,6 @@ def ssh_disconnect():
 
 
 
-
 def send_msg_to_clients(client_ids, msg, error=False):
     """Send message to all clients"""
     if error:
@@ -532,6 +535,7 @@ def client_disconnected():
     if pending is not None:
         pending.message_sent = True
     close_ssh_connection(request.sid)
+
     logger.info("Client websocket disconnected, id %s" % (request.sid))
 
 

@@ -12,6 +12,7 @@
   "dependencies": {
     "react": "^16.8",
     "react-dom": "^16.4",
+    "react-markdown": "^4.0.6",
     "socket.io": "^4.1",
     "socket.io-client": "^4.1",
     "statorgfc": "^0.1.6",

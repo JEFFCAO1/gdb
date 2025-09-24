@@ -38,7 +38,7 @@ def run_server(
     socketio=None,
     host=DEFAULT_HOST,
     port=DEFAULT_PORT,
-    debug=False,
+    debug=True,
     open_browser=True,
     browsername=None,
     testing=False,

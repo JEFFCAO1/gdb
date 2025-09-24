@@ -32,6 +32,7 @@ import ToolTipTourguide from "./ToolTipTourguide";
 
 import "../../static/css/gdbgui.css";
 import "../../static/css/splitjs-gdbgui.css";
+// import { Terminals } from "./Terminals";
 import BottomTabs from "./BottomTabs";
 
 const store_options = {
@@ -102,7 +103,7 @@ class Gdbgui extends React.PureComponent {
           />
 
           <div id="bottom_content" className="split content">
-            <BottomTabs />
+             <BottomTabs />
           </div>
         </div>
 

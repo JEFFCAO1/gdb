@@ -8,6 +8,22 @@ type GdbguiSession = {
   command: string;
   client_ids: string[];
 };
+
+type AnalysisResult = {
+  issueType: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  summary: string;
+  details: string;
+  recommendations: string[];
+  suggestedGdbCommand?: string;
+};
+
+type UploadedFile = {
+  name: string;
+  size: number;
+  type: string;
+  content: string;
+};
 const copyIcon = (
   <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path
@@ -147,7 +163,360 @@ class StartCommand extends React.Component<any, { value: string }> {
   }
 }
 
-function Nav() {
+// File Upload Component for error logs, core dumps, etc.
+function FileUpload({ 
+  label, 
+  accept, 
+  onFileUpload, 
+  uploadedFile 
+}: { 
+  label: string; 
+  accept: string; 
+  onFileUpload: (file: UploadedFile) => void;
+  uploadedFile?: UploadedFile;
+}) {
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const content = await file.text();
+    onFileUpload({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      content
+    });
+  };
+
+  return (
+    <div className="mb-4">
+      <label className="block text-sm font-medium text-gray-700 mb-2">
+        {label}
+      </label>
+      <input
+        type="file"
+        accept={accept}
+        onChange={handleFileChange}
+        className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+      />
+      {uploadedFile && (
+        <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded">
+          <p className="text-sm text-green-800">
+            ✓ {uploadedFile.name} ({(uploadedFile.size / 1024).toFixed(1)} KB)
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Source Code Directory Selection Component
+function SourceCodeDirectory({ 
+  onDirectorySelect, 
+  selectedDirectory 
+}: { 
+  onDirectorySelect: (path: string) => void;
+  selectedDirectory?: string;
+}) {
+  const [inputPath, setInputPath] = useState(selectedDirectory || '');
+
+  const handleBrowse = () => {
+    // For now, use input field. In a real implementation, this could open a file dialog
+    const path = prompt('Enter source code directory path:', inputPath || '/path/to/source');
+    if (path) {
+      setInputPath(path);
+      onDirectorySelect(path);
+    }
+  };
+
+  return (
+    <div className="mb-4">
+      <label className="block text-sm font-medium text-gray-700 mb-2">
+        Source Code Directory
+      </label>
+      <div className="flex">
+        <input
+          type="text"
+          value={inputPath}
+          onChange={(e) => setInputPath(e.target.value)}
+          onBlur={() => inputPath && onDirectorySelect(inputPath)}
+          placeholder="/path/to/source/code"
+          className="flex-grow px-3 py-2 border border-gray-300 rounded-l-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <button
+          onClick={handleBrowse}
+          className="px-4 py-2 bg-blue-500 text-white rounded-r-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          Browse
+        </button>
+      </div>
+      {selectedDirectory && (
+        <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+          <p className="text-sm text-blue-800">Selected: {selectedDirectory}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Analysis Results Display Component
+function AnalysisResults({ result }: { result: AnalysisResult }) {
+  const getSeverityColor = (severity: string) => {
+    switch (severity) {
+      case 'critical': return 'text-red-800 bg-red-100 border-red-200';
+      case 'high': return 'text-orange-800 bg-orange-100 border-orange-200';
+      case 'medium': return 'text-yellow-800 bg-yellow-100 border-yellow-200';
+      case 'low': return 'text-blue-800 bg-blue-100 border-blue-200';
+      default: return 'text-gray-800 bg-gray-100 border-gray-200';
+    }
+  };
+
+  const startDebugging = () => {
+    if (result.suggestedGdbCommand) {
+      const params = new URLSearchParams({
+        gdb_command: result.suggestedGdbCommand
+      }).toString();
+      window.open(`/?${params}`, '_blank');
+    }
+  };
+
+  return (
+    <div className="mt-6 p-6 bg-white border border-gray-200 rounded-lg shadow">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-xl font-semibold text-gray-800">Analysis Results</h3>
+        <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getSeverityColor(result.severity)}`}>
+          {result.severity.toUpperCase()} SEVERITY
+        </span>
+      </div>
+      
+      <div className="mb-4">
+        <h4 className="font-medium text-gray-800 mb-2">Issue Type</h4>
+        <p className="text-gray-700">{result.issueType}</p>
+      </div>
+
+      <div className="mb-4">
+        <h4 className="font-medium text-gray-800 mb-2">Summary</h4>
+        <p className="text-gray-700">{result.summary}</p>
+      </div>
+
+      <div className="mb-4">
+        <h4 className="font-medium text-gray-800 mb-2">Details</h4>
+        <div className="p-3 bg-gray-50 border border-gray-200 rounded">
+          <pre className="text-sm text-gray-700 whitespace-pre-wrap">{result.details}</pre>
+        </div>
+      </div>
+
+      <div className="mb-6">
+        <h4 className="font-medium text-gray-800 mb-2">Recommendations</h4>
+        <ul className="list-disc list-inside space-y-1">
+          {result.recommendations.map((rec, index) => (
+            <li key={index} className="text-gray-700">{rec}</li>
+          ))}
+        </ul>
+      </div>
+
+      {result.suggestedGdbCommand && (
+        <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded">
+          <div>
+            <p className="text-sm text-blue-800 font-medium">Suggested GDB Command:</p>
+            <code className="text-blue-900 bg-blue-100 px-2 py-1 rounded text-sm">
+              {result.suggestedGdbCommand}
+            </code>
+          </div>
+          <button
+            onClick={startDebugging}
+            className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            Start Debugging
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Issue Analysis Tab Component
+function IssueAnalysisTab() {
+  const [errorLog, setErrorLog] = useState<UploadedFile>();
+  const [coreFile, setCoreFile] = useState<UploadedFile>();
+  const [sourceDirectory, setSourceDirectory] = useState<string>();
+  const [additionalInfo, setAdditionalInfo] = useState<string>('');
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult>();
+  const [analyzing, setAnalyzing] = useState(false);
+
+  const handleAnalyze = async () => {
+    if (!errorLog && !coreFile && !sourceDirectory) {
+      alert('Please provide at least one input (error log, core file, or source directory)');
+      return;
+    }
+
+    setAnalyzing(true);
+    try {
+      const payload = {
+        errorLog: errorLog?.content || '',
+        coreFile: coreFile?.name || '',
+        sourceDirectory: sourceDirectory || '',
+        additionalInfo: additionalInfo || '',
+        hasErrorLog: !!errorLog,
+        hasCoreFile: !!coreFile,
+        hasSourceDirectory: !!sourceDirectory,
+        hasAdditionalInfo: !!additionalInfo
+      };
+
+      const response = await fetch('/api/analyze_issue', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error('Analysis failed');
+      }
+
+      const result = await response.json();
+      setAnalysisResult(result);
+    } catch (error) {
+      console.error('Analysis failed:', error);
+      alert('Analysis failed. Please try again.');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto p-6">
+      <div className="bg-white rounded-lg shadow p-6">
+        <h2 className="text-2xl font-bold text-gray-800 mb-4">AI-Powered Issue Analysis</h2>
+        <p className="text-gray-600 mb-6">
+          Get intelligent insights before debugging. Upload error logs, core dumps, or specify source code directories 
+          to receive AI-powered analysis with actionable recommendations and suggested debugging commands.
+        </p>
+        
+        {/* Feature highlights */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+          <div className="flex items-center space-x-3 p-3 bg-blue-50 rounded-lg">
+            <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
+              <span className="text-white font-bold">1</span>
+            </div>
+            <div>
+              <h3 className="font-semibold text-blue-800">Upload Files</h3>
+              <p className="text-sm text-blue-600">Error logs, core dumps</p>
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-3 p-3 bg-green-50 rounded-lg">
+            <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
+              <span className="text-white font-bold">2</span>
+            </div>
+            <div>
+              <h3 className="font-semibold text-green-800">AI Analysis</h3>
+              <p className="text-sm text-green-600">Intelligent assessment</p>
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-3 p-3 bg-purple-50 rounded-lg">
+            <div className="w-8 h-8 bg-purple-500 rounded-full flex items-center justify-center">
+              <span className="text-white font-bold">3</span>
+            </div>
+            <div>
+              <h3 className="font-semibold text-purple-800">Start Debugging</h3>
+              <p className="text-sm text-purple-600">Targeted GDB session</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <div>
+            <FileUpload
+              label="Error Log File"
+              accept=".log,.txt,.out,.err"
+              onFileUpload={setErrorLog}
+              uploadedFile={errorLog}
+            />
+            
+            <FileUpload
+              label="Core Dump File (optional)"
+              accept=".core,.dump"
+              onFileUpload={setCoreFile}
+              uploadedFile={coreFile}
+            />
+          </div>
+
+          <div>
+            <SourceCodeDirectory
+              onDirectorySelect={setSourceDirectory}
+              selectedDirectory={sourceDirectory}
+            />
+            
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Additional Information
+              </label>
+              <textarea
+                value={additionalInfo}
+                onChange={(e) => setAdditionalInfo(e.target.value)}
+                placeholder="Describe the problem, steps to reproduce, expected vs actual behavior..."
+                rows={4}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-center space-x-4">
+          <button
+            onClick={() => {
+              // Demo functionality - simulate a segfault analysis
+              setAnalysisResult({
+                issueType: 'Segmentation Fault',
+                severity: 'high',
+                summary: 'NULL pointer dereference detected in main function',
+                details: `Analysis indicates a segmentation fault caused by dereferencing a NULL pointer at line 42 in main.c.
+                
+Stack trace suggests the error occurs in the malloc() call where insufficient memory checking leads to accessing unallocated memory.
+
+Common causes:
+- Uninitialized pointer usage
+- Buffer overflow
+- Use after free
+- Array bounds violation`,
+                recommendations: [
+                  'Use Valgrind to detect memory errors: valgrind --leak-check=full ./program',
+                  'Enable AddressSanitizer: compile with -fsanitize=address',
+                  'Review pointer initialization and bounds checking',
+                  'Add null pointer checks before dereferencing',
+                  'Use static analysis tools like Clang Static Analyzer'
+                ],
+                suggestedGdbCommand: 'gdb ./program -ex "run" -ex "bt" -ex "info registers"'
+              });
+            }}
+            className="px-6 py-3 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            Try Demo
+          </button>
+          
+          <button
+            onClick={handleAnalyze}
+            disabled={analyzing || (!errorLog && !coreFile && !sourceDirectory && !additionalInfo)}
+            className={`px-8 py-3 rounded-lg font-medium ${
+              analyzing || (!errorLog && !coreFile && !sourceDirectory && !additionalInfo)
+                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                : 'bg-green-500 text-white hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500'
+            }`}
+          >
+            {analyzing ? 'Analyzing...' : 'Analyze Issue'}
+          </button>
+        </div>
+
+        {analysisResult && <AnalysisResults result={analysisResult} />}
+      </div>
+    </div>
+  );
+}
+
+function Nav({ activeTab, setActiveTab }: { activeTab: string; setActiveTab: (tab: string) => void }) {
   return (
     <nav className="flex items-center justify-between flex-wrap bg-blue-500 p-6">
       <div className="flex items-center flex-shrink-0 text-white mr-6">
@@ -160,7 +529,27 @@ function Nav() {
       </div>
 
       <div className="w-full block flex-grow lg:flex lg:items-center lg:w-auto">
-        <div className="text-sm lg:flex-grow">
+        <div className="text-sm lg:flex-grow flex">
+          <button
+            onClick={() => setActiveTab('analysis')}
+            className={`block mt-4 lg:inline-block lg:mt-0 mr-4 px-3 py-1 rounded ${
+              activeTab === 'analysis' 
+                ? 'bg-blue-600 text-white' 
+                : 'text-blue-200 hover:text-white'
+            }`}
+          >
+            Issue Analysis
+          </button>
+          <button
+            onClick={() => setActiveTab('sessions')}
+            className={`block mt-4 lg:inline-block lg:mt-0 mr-4 px-3 py-1 rounded ${
+              activeTab === 'sessions' 
+                ? 'bg-blue-600 text-white' 
+                : 'text-blue-200 hover:text-white'
+            }`}
+          >
+            Debug Sessions
+          </button>
           <a
             href="https://gdbgui.com"
             className="block mt-4 lg:inline-block lg:mt-0 text-blue-200 hover:text-white mr-4"
@@ -168,22 +557,10 @@ function Nav() {
             Docs
           </a>
           <a
-            href="https://www.youtube.com/channel/UCUCOSclB97r9nd54NpXMV5A"
-            className="block mt-4 lg:inline-block lg:mt-0 text-blue-200 hover:text-white mr-4"
-          >
-            YouTube
-          </a>
-          <a
             href="https://github.com/cs01/gdbgui"
             className="block mt-4 lg:inline-block lg:mt-0 text-blue-200 hover:text-white mr-4"
           >
             GitHub
-          </a>
-          <a
-            href="https://www.paypal.com/paypalme/grassfedcode/20"
-            className="block mt-4 lg:inline-block lg:mt-0 text-blue-200 hover:text-white mr-4"
-          >
-            Donate
           </a>
         </div>
       </div>
@@ -191,57 +568,89 @@ function Nav() {
   );
 }
 
-class Dashboard extends React.PureComponent<any, { sessions: GdbguiSession[] }> {
+// Debug Sessions Tab Component
+function DebugSessionsTab({ sessions, updateData }: { sessions: GdbguiSession[]; updateData: () => void }) {
+  const sessionElements = sessions.map((d, index) => (
+    <GdbguiSession key={index} session={d} updateData={updateData} />
+  ));
+
+  return (
+    <div className="flex-grow w-full h-full bg-gray-300 text-center p-5">
+      <div className="text-3xl font-semibold">Start new session</div>
+      <StartCommand />
+      <div className="mt-5 text-3xl font-semibold">
+        {sessions.length === 1
+          ? "There is 1 gdbgui session running"
+          : `There are ${sessions.length} gdbgui sessions running`}
+      </div>
+      <table className="table-auto mx-auto">
+        <thead>
+          <tr>
+            <th className="px-4 py-2">Command</th>
+            <th className="px-4 py-2">PID</th>
+            <th className="px-4 py-2">Connected Browsers</th>
+            <th className="px-4 py-2">Start Time</th>
+            <th className="px-4 py-2"></th>
+          </tr>
+        </thead>
+        <tbody>{sessionElements}</tbody>
+      </table>
+    </div>
+  );
+}
+
+class Dashboard extends React.PureComponent<any, { sessions: GdbguiSession[]; activeTab: string }> {
   interval: NodeJS.Timeout | undefined;
   constructor(props: any) {
     super(props);
-    this.state = { sessions: data };
+    this.state = { 
+      sessions: data,
+      activeTab: 'analysis' // Default to issue analysis tab
+    };
     this.updateData = this.updateData.bind(this);
+    this.setActiveTab = this.setActiveTab.bind(this);
   }
+  
   async updateData() {
     const response = await fetch("/dashboard_data");
     const sessions = await response.json();
     this.setState({ sessions });
   }
+  
+  setActiveTab(tab: string) {
+    this.setState({ activeTab: tab });
+  }
+  
   componentDidMount() {
     this.interval = setInterval(this.updateData, 5000);
   }
+  
   componentWillUnmount() {
     if (this.interval) {
       clearInterval(this.interval);
     }
   }
+  
   render() {
-    const sessions = this.state.sessions.map((d, index) => (
-      <GdbguiSession key={index} session={d} updateData={this.updateData} />
-    ));
+    const { sessions, activeTab } = this.state;
+    
     return (
       <div className="w-full h-full min-h-screen flex flex-col">
-        <Nav />
-        <div className="flex-grow w-full h-full bg-gray-300 text-center p-5">
-          <div className="text-3xl font-semibold">Start new session</div>
-          <StartCommand />
-          <div className="mt-5 text-3xl font-semibold">
-            {sessions.length === 1
-              ? "There is 1 gdbgui session running"
-              : `There are ${sessions.length} gdbgui sessions running`}
+        <Nav activeTab={activeTab} setActiveTab={this.setActiveTab} />
+        
+        {activeTab === 'analysis' && (
+          <div className="flex-grow bg-gray-100 py-8">
+            <IssueAnalysisTab />
           </div>
-          <table className="table-auto mx-auto">
-            <thead>
-              <tr>
-                <th className="px-4 py-2">Command</th>
-                <th className="px-4 py-2">PID</th>
-                <th className="px-4 py-2">Connected Browsers</th>
-                <th className="px-4 py-2">Start Time</th>
-                <th className="px-4 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>{sessions}</tbody>
-          </table>
-        </div>
+        )}
+        
+        {activeTab === 'sessions' && (
+          <DebugSessionsTab sessions={sessions} updateData={this.updateData} />
+        )}
+        
         <footer className="h-40 bold text-lg bg-black text-gray-500 text-center flex flex-col justify-center">
           <p>gdbgui</p>
-          <p>The browser-based frontend to gdb</p>
+          <p>The browser-based frontend to gdb with AI-powered issue analysis</p>
           <a href="https://chadsmith.dev">Copyright Chad Smith</a>
         </footer>
       </div>

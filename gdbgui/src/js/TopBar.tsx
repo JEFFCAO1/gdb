@@ -94,11 +94,6 @@ const menu = (
       </a>
       <ul className="dropdown-menu">
         <li>
-          <a title="dashboard" className="pointer" href="/dashboard">
-            Dashboard
-          </a>
-        </li>
-        <li>
           <a
             title="show guide"
             className="pointer"
