@@ -1,6 +1,7 @@
 import React from "react";
 import GdbApi from "./GdbApi";
 
+
 type Message = {
   id: number;
   role: "user" | "server";
@@ -24,7 +25,8 @@ const statusLabels: Record<SshConnectionState, string> = {
 };
 
 const SshConsole: React.FC = () => {
-  const socket = GdbApi.getSocket();
+  // Keep the socket in state so that it can be updated once GdbApi initialises.
+  const [socket, setSocket] = React.useState<any>(GdbApi.getSocket());
   const [connectionState, setConnectionState] =
     React.useState<SshConnectionState>("disconnected");
   const [messages, setMessages] = React.useState<Message[]>([]);
@@ -37,6 +39,23 @@ const SshConsole: React.FC = () => {
   const messageEndRef = React.useRef<HTMLDivElement | null>(null);
   const connectionTimeoutRef = React.useRef<number | null>(null);
 
+  React.useEffect(() => {
+    if (!socket) {
+      const api: any = GdbApi as any;
+      if (api && typeof api.init === "function") {
+        try {
+          api.init();
+        } catch (err) {
+          console.warn("Failed to init GdbApi:", err);
+        }
+      }
+      const newSocket = GdbApi.getSocket();
+      if (newSocket) {
+        setSocket(newSocket);
+      }
+    }
+  }, [socket]);
+
   const appendMessage = React.useCallback((message: Omit<Message, "id">) => {
     setMessages((prevMessages) => [
       ...prevMessages,
@@ -47,6 +66,7 @@ const SshConsole: React.FC = () => {
     ]);
   }, []);
 
+ 
   React.useEffect(() => {
     if (!socket) {
       return;
@@ -117,15 +137,16 @@ const SshConsole: React.FC = () => {
     };
   }, [appendMessage, socket]);
 
+  // Emit a disconnect event when the component unmounts or the socket changes.
   React.useEffect(() => {
     if (!socket) {
       return;
     }
-
     return () => {
       socket.emit("ssh_disconnect");
     };
   }, [socket]);
+
 
   React.useEffect(() => {
     if (connectionState !== "connecting") {
@@ -165,6 +186,7 @@ const SshConsole: React.FC = () => {
     };
   }, [appendMessage, connectionState]);
 
+  // Scroll to the bottom of the message list whenever messages change.
   React.useEffect(() => {
     if (messageEndRef.current) {
       messageEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -233,11 +255,12 @@ const SshConsole: React.FC = () => {
     });
   };
 
-  const handleCommandKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleCommandKeyDown = (
+    event: React.KeyboardEvent<HTMLInputElement>,
+  ) => {
     if (!commandHistory.length) {
       return;
     }
-
     if (event.key === "ArrowUp") {
       event.preventDefault();
       setHistoryIndex((prev) => {
@@ -337,8 +360,8 @@ const SshConsole: React.FC = () => {
             {connectionState === "connected"
               ? "重新连接"
               : connectionState === "connecting"
-                ? "连接中..."
-                : "连接"}
+              ? "连接中..."
+              : "连接"}
           </button>
           <button
             type="button"

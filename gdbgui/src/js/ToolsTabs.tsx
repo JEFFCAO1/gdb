@@ -5,18 +5,33 @@ import "./initGlobals";
 import SshConsole from "./SshConsole";
 import GdbApi from "./GdbApi";
 
-
-function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedData}: { onCollectPty: () => void; injectedMessage?: string | null; className?: string | "w-80"; getCollectedData?: () => Promise<string | null> }) {
+function ChatSidebar({
+  onCollectPty,
+  injectedMessage,
+  className,
+  getCollectedData,
+  showStraceOption = false,
+}: {
+  onCollectPty: () => void;
+  injectedMessage?: string | null;
+  className?: string | "w-80";
+  getCollectedData?: () => Promise<string | null>;
+  showStraceOption?: boolean;
+}) {
   const [messages, setMessages] = React.useState([
-    { sender: "ai", text: "Hi! I'm your AI assistant. How can I help you today?" }
+    { sender: "ai", text: "Hi! I'm your AI assistant. How can I help you today?" },
   ]);
   const [input, setInput] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
   const [autoCollect, setAutoCollect] = React.useState(false);
+  const [straceChecked, setStraceChecked] = React.useState(false);
   const [waitingForCollection, setWaitingForCollection] = React.useState(false);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
-  const collectionPromiseRef = React.useRef<{ resolve: (value: { [key: string]: string } | null) => void; reject: (error: any) => void } | null>(null);
+  const collectionPromiseRef = React.useRef<{
+    resolve: (value: { [key: string]: string } | null) => void;
+    reject: (error: any) => void;
+  } | null>(null);
   const lastInjectedMessageRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
@@ -31,12 +46,12 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
   // Listen for structured debug context from iframe
   React.useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      if (event.data.type === 'structuredDebugContext') {
+      if (event.data.type === "structuredDebugContext") {
         const debugContext = event.data.payload;
-        console.debug('[ChatSidebar] Received structured debug context:', debugContext);
-        
+        console.debug("[ChatSidebar] Received structured debug context:", debugContext);
+
         setStructuredDebugContextRef(debugContext);
-        
+
         // If we're waiting for collection, resolve the promise
         if (waitingForCollection && collectionPromiseRef.current) {
           collectionPromiseRef.current.resolve(debugContext);
@@ -46,56 +61,58 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
         // Only show message in chat if auto-collect is disabled AND we're not waiting for collection
         else if (!autoCollect && !waitingForCollection) {
           // For structured data, show a simple summary instead of raw data
-          const summary = `Debug context available: ${Object.keys(debugContext).filter(k => debugContext[k]).join(', ')}`;
-          setMessages(msgs => [...msgs, { sender: "ai", text: summary }]);
+          const summary = `Debug context available: ${Object.keys(debugContext)
+            .filter((k) => debugContext[k])
+            .join(", ")}`;
+          setMessages((msgs) => [...msgs, { sender: "ai", text: summary }]);
         }
       }
     };
 
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
   }, [autoCollect, waitingForCollection]);
 
   // Legacy support for injected messages (keeping for backward compatibility)
   React.useEffect(() => {
     if (injectedMessage && injectedMessage !== lastInjectedMessageRef.current) {
       lastInjectedMessageRef.current = injectedMessage;
-      
+
       // Only show legacy messages if auto-collect is disabled AND we're not waiting for collection
       if (!autoCollect && !waitingForCollection) {
         // Only show if this message doesn't look like debug context
         const isDebugContext = /### Collected Terminal Contents|### Source Code Contents|### Right Sidebar Contents/.test(injectedMessage);
         if (!isDebugContext) {
-          setMessages(msgs => [...msgs, { sender: "ai", text: injectedMessage }]);
+          setMessages((msgs) => [...msgs, { sender: "ai", text: injectedMessage }]);
         }
       }
     }
   }, [injectedMessage, autoCollect, waitingForCollection]);
 
   function formatAssistantReply(raw: string): string {
-    if (!raw) return '[No reply]';
+    if (!raw) return "[No reply]";
     let txt = raw.trim();
     // Collapse excessive blank lines
-    txt = txt.replace(/\n{3,}/g, '\n\n');
+    txt = txt.replace(/\n{3,}/g, "\n\n");
     // Ensure code fences are balanced
     const fenceCount = (txt.match(/```/g) || []).length;
     if (fenceCount % 2 === 1) {
-      txt += '\n```';
+      txt += "\n```";
     }
     // Add markdown bullets when the model returns numbered list without periods
     txt = txt.replace(/^(\d+) +(.*)$/gm, (m, n, rest) => `${n}. ${rest}`);
     // Normalize indentation inside code blocks
-    txt = txt.replace(/```[\s\S]*?```/g, block => {
-      const lines = block.split('\n');
+    txt = txt.replace(/```[\s\S]*?```/g, (block) => {
+      const lines = block.split("\n");
       if (lines.length < 3) return block; // nothing to normalize
       const contentLines = lines.slice(1, -1);
       const indents = contentLines
-        .filter(l => l.trim())
-        .map(l => l.match(/^\s*/)?.[0].length || 0);
+        .filter((l) => l.trim())
+        .map((l) => l.match(/^\s*/)?.[0].length || 0);
       const minIndent = indents.length ? Math.min(...indents) : 0;
       if (minIndent > 0) {
-        const newContent = contentLines.map(l => l.slice(minIndent)).join('\n');
-        return [lines[0], newContent, lines[lines.length - 1]].join('\n');
+        const newContent = contentLines.map((l) => l.slice(minIndent)).join("\n");
+        return [lines[0], newContent, lines[lines.length - 1]].join("\n");
       }
       return block;
     });
@@ -111,7 +128,7 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
     setMessages((msgs) => [...msgs, userMsg]);
     setInput("");
     setLoading(true);
-    
+
     // Auto-collect context if checkbox is enabled
     let structuredDebugContext = null;
     if (autoCollect) {
@@ -119,7 +136,7 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
         // Create a promise to wait for collection
         const collectionPromise = new Promise<{ [key: string]: string } | null>((resolve, reject) => {
           collectionPromiseRef.current = { resolve, reject };
-          
+
           // Set timeout to avoid infinite waiting
           setTimeout(() => {
             if (collectionPromiseRef.current) {
@@ -129,36 +146,35 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
             }
           }, 3000); // 3 second timeout
         });
-        
+
         setWaitingForCollection(true);
-        
+
         // Trigger collection
         onCollectPty();
-        
+
         // Wait for collection to complete
         const debugData = await collectionPromise;
-        
+
         // Use the structured data directly
         if (debugData) {
           structuredDebugContext = debugData;
-          console.debug('[ChatSidebar] Successfully collected structured debug context:', structuredDebugContext);
+          console.debug("[ChatSidebar] Successfully collected structured debug context:", structuredDebugContext);
         } else {
-          console.warn('[ChatSidebar] Failed to collect debug context - timeout or no data');
+          console.warn("[ChatSidebar] Failed to collect debug context - timeout or no data");
         }
       } catch (e) {
-        console.warn('Failed to collect context:', e);
+        console.warn("Failed to collect context:", e);
         setWaitingForCollection(false);
         if (collectionPromiseRef.current) {
           collectionPromiseRef.current = null;
         }
       }
     }
-    
-    try {
 
+    try {
       const payload = {
         query: input,
-        inputs: structuredDebugContext || {}
+        inputs: structuredDebugContext || {},
       };
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -167,16 +183,10 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
       });
       if (!res.ok) throw new Error("API error: " + res.status);
       const data = await res.json();
-      setMessages((msgs) => [
-        ...msgs,
-        { sender: "ai", text: data.reply || "[No reply]" },
-      ]);
+      setMessages((msgs) => [...msgs, { sender: "ai", text: data.reply || "[No reply]" }]);
     } catch (e: any) {
       setError(e?.message || "Unknown error");
-      setMessages((msgs) => [
-        ...msgs,
-        { sender: "ai", text: "Sorry, I couldn't process your request." },
-      ]);
+      setMessages((msgs) => [...msgs, { sender: "ai", text: "Sorry, I couldn't process your request." }]);
     } finally {
       setLoading(false);
     }
@@ -186,13 +196,7 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
     if (e.key === "Enter") handleSend();
   }
 
-
-  const containerClassName = [
-    "h-full bg-gray-100 border-l flex flex-col",
-    className,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const containerClassName = ["h-full bg-gray-100 border-l flex flex-col", className].filter(Boolean).join(" ");
 
   return (
     <div className={containerClassName}>
@@ -203,22 +207,22 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
       </div>
       <div className="flex-1 overflow-y-auto p-2 text-sm space-y-3">
         {messages.map((msg, i) => {
-          const isUser = msg.sender === 'user';
+          const isUser = msg.sender === "user";
           const isLong = !isUser && /Collected Terminal Contents|Right Sidebar Contents/.test(msg.text);
           return (
-            <div key={i} className={isUser ? 'flex justify-end' : 'flex justify-start'}>
+            <div key={i} className={isUser ? "flex justify-end" : "flex justify-start"}>
               <div
                 className={
-                  'rounded-lg px-3 py-2 ' +
+                  "rounded-lg px-3 py-2 " +
                   (isLong
-                    ? 'w-full whitespace-pre-wrap bg-white text-gray-800 border' 
-                    : (isUser
-                        ? 'bg-blue-500 text-white self-end max-w-xs'
-                        : 'bg-white text-gray-800 border self-start flex items-start gap-2 max-w-xs'))
+                    ? "w-full whitespace-pre-wrap bg-white text-gray-800 border"
+                    : isUser
+                    ? "bg-blue-500 text-white self-end max-w-xs"
+                    : "bg-white text-gray-800 border self-start flex items-start gap-2 max-w-xs")
                 }
               >
-                {msg.sender === 'ai' && !isLong && <span className="mr-2">🤖</span>}
-                <div className={isLong ? 'w-full prose prose-sm max-w-none markdown-body' : ''}>
+                {msg.sender === "ai" && !isLong && <span className="mr-2">🤖</span>}
+                <div className={isLong ? "w-full prose prose-sm max-w-none markdown-body" : ""}>
                   <ReactMarkdown>{msg.text}</ReactMarkdown>
                 </div>
               </div>
@@ -230,17 +234,32 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
       </div>
       {/* Display an error banner if an error occurred */}
       {error && <div className="text-red-600 text-xs px-2 pb-1">{error}</div>}
-      {/* Auto-collect checkbox */}
-      <div className="px-2 py-1 border-t bg-gray-50">
-        <label className="flex items-center gap-2 text-xs text-gray-600">
-          <input
-            type="checkbox"
-            checked={autoCollect}
-            onChange={(e) => setAutoCollect(e.target.checked)}
-            className="rounded"
-          />
-          GDB
-        </label>
+      {/* Auto-collect and strace checkboxes */}
+      <div className="px-2 py-1 border-t bg-gray-50 flex flex-col gap-1">
+        {/* 只有在非 strace 页面时显示 GDB 勾选框 */}
+        {!showStraceOption && (
+          <label className="flex items-center gap-2 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={autoCollect}
+              onChange={(e) => setAutoCollect(e.target.checked)}
+              className="rounded"
+            />
+            GDB
+          </label>
+        )}
+        {/* 在 strace 页面时只显示 strace 勾选框 */}
+        {showStraceOption && (
+          <label className="flex items-center gap-2 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={straceChecked}
+              onChange={(e) => setStraceChecked(e.target.checked)}
+              className="rounded"
+            />
+            strace
+          </label>
+        )}
       </div>
       <div className="p-2 border-t flex gap-2">
         <input
@@ -264,22 +283,17 @@ function ChatSidebar({ onCollectPty, injectedMessage, className, getCollectedDat
 }
 
 // Always render the iframe, only toggle visibility
-const GdbPanel = React.forwardRef<HTMLIFrameElement, { visible: boolean }>(
-  ({ visible }, ref) => (
-    <div 
-      className="w-full h-full flex flex-col flex-1 min-h-0"
-      style={{ display: visible ? 'flex' : 'none' }}
-    >
-      <iframe
-        ref={ref}
-        src="/gdb"
-        title="gdbgui"
-        className="w-full flex-1 min-h-0 border-0"
-        style={{ minHeight: 0, height: '100%' }}
-      />
-    </div>
-  )
-);
+const GdbPanel = React.forwardRef<HTMLIFrameElement, { visible: boolean }>(({ visible }, ref) => (
+  <div className="w-full h-full flex flex-col flex-1 min-h-0" style={{ display: visible ? "flex" : "none" }}>
+    <iframe
+      ref={ref}
+      src="/gdb"
+      title="gdbgui"
+      className="w-full flex-1 min-h-0 border-0"
+      style={{ minHeight: 0, height: "100%" }}
+    />
+  </div>
+));
 
 export default function ToolsTabs() {
   const [active, setActive] = useState("gdb");
@@ -287,65 +301,64 @@ export default function ToolsTabs() {
   const [gdbReady, setGdbReady] = React.useState(false);
   const [ptyMessage, setPtyMessage] = React.useState<string | null>(null);
 
-
   React.useEffect(() => {
     const handler = (e: MessageEvent) => {
       if (!e.data) return;
-      if (e.data.type === 'gdbguiReady') {
+      if (e.data.type === "gdbguiReady") {
         setGdbReady(true);
-        console.debug('[ToolsTabs] gdb iframe reported ready');
-      } else if (e.data.type === 'ptyContents') {
+        console.debug("[ToolsTabs] gdb iframe reported ready");
+      } else if (e.data.type === "ptyContents") {
         const { payload } = e.data;
         if (payload) {
-          let formatted = [];
-          
+          let formatted: string[] = [];
+
           // Handle new structure with terminals and sourceCode
           if (payload.terminals) {
-            formatted.push('### Collected Terminal Contents');
-            formatted.push('');
-            formatted.push('#### userPty');
-            formatted.push('```\n' + (payload.terminals.userPty || '(empty)') + '\n```');
-            formatted.push('');
-            formatted.push('#### programPty');
-            formatted.push('```\n' + (payload.terminals.programPty || '(empty)') + '\n```');
-            formatted.push('');
-            formatted.push('#### gdbguiPty');
-            formatted.push('```\n' + (payload.terminals.gdbguiPty || '(empty)') + '\n```');
-            
+            formatted.push("### Collected Terminal Contents");
+            formatted.push("");
+            formatted.push("#### userPty");
+            formatted.push("```\n" + (payload.terminals.userPty || "(empty)") + "\n```");
+            formatted.push("");
+            formatted.push("#### programPty");
+            formatted.push("```\n" + (payload.terminals.programPty || "(empty)") + "\n```");
+            formatted.push("");
+            formatted.push("#### gdbguiPty");
+            formatted.push("```\n" + (payload.terminals.gdbguiPty || "(empty)") + "\n```");
+
             // Add source code contents if available
             if (payload.sourceCode) {
-              formatted.push('');
-              formatted.push('### Source Code Contents');
-              formatted.push('');
+              formatted.push("");
+              formatted.push("### Source Code Contents");
+              formatted.push("");
               formatted.push(`**File:** ${payload.sourceCode.filename}`);
               formatted.push(`**State:** ${payload.sourceCode.sourceCodeState}`);
-              
+
               if (payload.sourceCode.currentLine) {
                 formatted.push(`**Current Line:** ${payload.sourceCode.currentLine}`);
               }
-              
+
               if (payload.sourceCode.breakpoints && payload.sourceCode.breakpoints.length > 0) {
-                formatted.push(`**Breakpoints:** ${payload.sourceCode.breakpoints.join(', ')}`);
+                formatted.push(`**Breakpoints:** ${payload.sourceCode.breakpoints.join(", ")}`);
               }
-              
+
               if (payload.sourceCode.sourceLines && payload.sourceCode.sourceLines.length > 0) {
-                formatted.push('');
-                formatted.push('#### Source Code');
-                formatted.push('```c\n' + payload.sourceCode.sourceLines.join('\n') + '\n```');
+                formatted.push("");
+                formatted.push("#### Source Code");
+                formatted.push("```c\n" + payload.sourceCode.sourceLines.join("\n") + "\n```");
               }
-              
+
               if (payload.sourceCode.assemblyLines && payload.sourceCode.assemblyLines.length > 0) {
-                formatted.push('');
-                formatted.push('#### Assembly');
-                formatted.push('```asm\n' + payload.sourceCode.assemblyLines.join('\n') + '\n```');
+                formatted.push("");
+                formatted.push("#### Assembly");
+                formatted.push("```asm\n" + payload.sourceCode.assemblyLines.join("\n") + "\n```");
               }
             }
 
             // Add right sidebar contents if available
             if (payload.rightSidebar) {
-              formatted.push('');
-              formatted.push('### Right Sidebar Contents');
-              formatted.push('');
+              formatted.push("");
+              formatted.push("### Right Sidebar Contents");
+              formatted.push("");
 
               // Current execution context
               if (payload.rightSidebar.currentThreadId !== null) {
@@ -357,47 +370,47 @@ export default function ToolsTabs() {
 
               // Threads info
               if (payload.rightSidebar.threads && payload.rightSidebar.threads.length > 0) {
-                formatted.push('');
-                formatted.push('#### Threads');
+                formatted.push("");
+                formatted.push("#### Threads");
                 for (const thread of payload.rightSidebar.threads) {
-                  formatted.push(`- Thread ${thread.id}: ${thread.state}${thread.name ? ` (${thread.name})` : ''}`);
+                  formatted.push(`- Thread ${thread.id}: ${thread.state}${thread.name ? ` (${thread.name})` : ""}`);
                 }
               }
 
               // Locals
               if (payload.rightSidebar.locals && payload.rightSidebar.locals.length > 0) {
-                formatted.push('');
-                formatted.push('#### Local Variables');
+                formatted.push("");
+                formatted.push("#### Local Variables");
                 for (const local of payload.rightSidebar.locals) {
-                  formatted.push(`- **${local.name}** (${local.type}): ${local.value || '(no value)'}`);
+                  formatted.push(`- **${local.name}** (${local.type}): ${local.value || "(no value)"}`);
                 }
               }
 
               // Expressions
               if (payload.rightSidebar.expressions && payload.rightSidebar.expressions.length > 0) {
-                formatted.push('');
-                formatted.push('#### Expressions');
+                formatted.push("");
+                formatted.push("#### Expressions");
                 for (const expr of payload.rightSidebar.expressions) {
-                  formatted.push(`- **${expr.expression}** (${expr.type}): ${expr.value || '(no value)'}`);
+                  formatted.push(`- **${expr.expression}** (${expr.type}): ${expr.value || "(no value)"}`);
                 }
               }
 
               // Breakpoints
               if (payload.rightSidebar.breakpoints && payload.rightSidebar.breakpoints.length > 0) {
-                formatted.push('');
-                formatted.push('#### Breakpoints');
+                formatted.push("");
+                formatted.push("#### Breakpoints");
                 for (const bp of payload.rightSidebar.breakpoints) {
-                  const status = bp.enabled === 'y' ? 'enabled' : 'disabled';
-                  const condition = bp.condition ? ` (condition: ${bp.condition})` : '';
-                  const hits = bp.timesHit ? ` [hit ${bp.timesHit} times]` : '';
+                  const status = bp.enabled === "y" ? "enabled" : "disabled";
+                  const condition = bp.condition ? ` (condition: ${bp.condition})` : "";
+                  const hits = bp.timesHit ? ` [hit ${bp.timesHit} times]` : "";
                   formatted.push(`- **${bp.number}:** ${bp.fullname}:${bp.line} (${status})${condition}${hits}`);
                 }
               }
 
               // Memory
               if (payload.rightSidebar.memory && payload.rightSidebar.memory.startAddr) {
-                formatted.push('');
-                formatted.push('#### Memory View');
+                formatted.push("");
+                formatted.push("#### Memory View");
                 formatted.push(`**Address Range:** ${payload.rightSidebar.memory.startAddr} - ${payload.rightSidebar.memory.endAddr}`);
                 formatted.push(`**Bytes Per Line:** ${payload.rightSidebar.memory.bytesPerLine}`);
                 const cacheSize = Object.keys(payload.rightSidebar.memory.cache || {}).length;
@@ -408,8 +421,8 @@ export default function ToolsTabs() {
 
               // Registers
               if (payload.rightSidebar.registers && payload.rightSidebar.registers.names && payload.rightSidebar.registers.names.length > 0) {
-                formatted.push('');
-                formatted.push('#### Registers');
+                formatted.push("");
+                formatted.push("#### Registers");
                 formatted.push(`**Available Registers:** ${payload.rightSidebar.registers.names.length}`);
                 const currentValues = Object.keys(payload.rightSidebar.registers.currentValues || {}).length;
                 if (currentValues > 0) {
@@ -419,26 +432,26 @@ export default function ToolsTabs() {
             }
           } else {
             // Fallback for old structure
-            formatted.push('### Collected Terminal Contents');
-            formatted.push('');
-            formatted.push('#### userPty');
-            formatted.push('```\n' + (payload.userPty || '(empty)') + '\n```');
-            formatted.push('');
-            formatted.push('#### programPty');
-            formatted.push('```\n' + (payload.programPty || '(empty)') + '\n```');
-            formatted.push('');
-            formatted.push('#### gdbguiPty');
-            formatted.push('```\n' + (payload.gdbguiPty || '(empty)') + '\n```');
+            formatted.push("### Collected Terminal Contents");
+            formatted.push("");
+            formatted.push("#### userPty");
+            formatted.push("```\n" + (payload.userPty || "(empty)") + "\n```");
+            formatted.push("");
+            formatted.push("#### programPty");
+            formatted.push("```\n" + (payload.programPty || "(empty)") + "\n```");
+            formatted.push("");
+            formatted.push("#### gdbguiPty");
+            formatted.push("```\n" + (payload.gdbguiPty || "(empty)") + "\n```");
           }
-          
-          setPtyMessage(formatted.join('\n'));
+
+          setPtyMessage(formatted.join("\n"));
         }
       }
     };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
   }, []);
-  
+
   const isStrace = active === "strace";
   const tabs = [
     { label: "GDB", id: "gdb" },
@@ -458,20 +471,18 @@ export default function ToolsTabs() {
     );
   };
 
-  const TopPanel = ({ visible }: { visible: boolean }) => (
-    visible ? <div className="p-4">top tool content here</div> : null
-  );
+  const TopPanel = ({ visible }: { visible: boolean }) => (visible ? <div className="p-4">top tool content here</div> : null);
 
   const handleCollectPty = () => {
     if (!gdbReady) {
-      console.warn('[ToolsTabs] gdb iframe not ready yet');
+      console.warn("[ToolsTabs] gdb iframe not ready yet");
       return;
     }
     if (gdbIframeRef.current && gdbIframeRef.current.contentWindow) {
-      console.debug('[ToolsTabs] sending collectPty postMessage to collect terminal and source code contents');
-      gdbIframeRef.current.contentWindow.postMessage({ type: 'collectPty' }, '*');
+      console.debug("[ToolsTabs] sending collectPty postMessage to collect terminal and source code contents");
+      gdbIframeRef.current.contentWindow.postMessage({ type: "collectPty" }, "*");
     } else {
-      console.warn('[ToolsTabs] iframe window not available');
+      console.warn("[ToolsTabs] iframe window not available");
     }
   };
 
@@ -505,9 +516,7 @@ export default function ToolsTabs() {
             <button
               key={tab.id}
               className={`px-6 py-3 font-semibold border-b-2 transition-colors duration-150 ${
-                active === tab.id
-                  ? "border-blue-500 text-blue-600 bg-gray-100"
-                  : "border-transparent text-gray-500 hover:text-blue-500"
+                active === tab.id ? "border-blue-500 text-blue-600 bg-gray-100" : "border-transparent text-gray-500 hover:text-blue-500"
               }`}
               onClick={() => setActive(tab.id)}
             >
@@ -527,7 +536,13 @@ export default function ToolsTabs() {
          active we allow the chat to grow by applying flex styles; on
          other tabs we stick to the default fixed width provided by
          ChatSidebar. */}
-      <ChatSidebar onCollectPty={handleCollectPty} injectedMessage={ptyMessage} className={isStrace ? "flex-1 min-w-0" : undefined} getCollectedData={getCollectedData} />
+      <ChatSidebar
+        onCollectPty={handleCollectPty}
+        injectedMessage={ptyMessage}
+        className={isStrace ? "flex-1 min-w-0" : undefined}
+        getCollectedData={getCollectedData}
+        showStraceOption={isStrace}
+      />
     </div>
   );
 }
