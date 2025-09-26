@@ -1,3 +1,4 @@
+// gdbgui/src/js/SshConsole.tsx
 import React from "react";
 import GdbApi from "./GdbApi";
 
@@ -24,6 +25,8 @@ const statusLabels: Record<SshConnectionState, string> = {
   connected: "已连接",
 };
 
+const passwordPromptRegex = /(password|passphrase|密码)\s*[:：]?\s*$/i;
+
 const SshConsole: React.FC = () => {
   // Keep the socket in state so that it can be updated once GdbApi initialises.
   const [socket, setSocket] = React.useState<any>(GdbApi.getSocket());
@@ -32,11 +35,14 @@ const SshConsole: React.FC = () => {
   const [messages, setMessages] = React.useState<Message[]>([]);
   const [formState, setFormState] = React.useState(initialFormState);
   const [command, setCommand] = React.useState("");
-  const [isSendingCommand, setIsSendingCommand] = React.useState(false);
+  const [isCommandRunning, setIsCommandRunning] = React.useState(false);
   const [commandHistory, setCommandHistory] = React.useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = React.useState<number | null>(null);
+  const [isShellActive, setIsShellActive] = React.useState(false);
+  const [isShellToggling, setIsShellToggling] = React.useState(false);
   const nextMessageIdRef = React.useRef(1);
   const messageEndRef = React.useRef<HTMLDivElement | null>(null);
+  const commandInputRef = React.useRef<HTMLInputElement | null>(null);
   const connectionTimeoutRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
@@ -66,14 +72,45 @@ const SshConsole: React.FC = () => {
     ]);
   }, []);
 
- 
-  React.useEffect(() => {
-    if (!socket) {
-      return;
-    }
+  const [shouldMaskNextInput, setShouldMaskNextInput] = React.useState(false);
 
-    const handleConnection = (data: { ok: boolean; message?: string }) => {
-      setConnectionState(data.ok ? "connected" : "disconnected");
+  const checkForPasswordPrompt = React.useCallback((text: string) => {
+    const lines = text.split(/\r?\n/);
+    for (const line of lines) {
+      if (passwordPromptRegex.test(line.trim())) {
+        setShouldMaskNextInput(true);
+        break;
+      }
+    }
+  }, []);
+
+  const handleShellOutput = React.useCallback(
+    (data: { output?: string; isError?: boolean }) => {
+      if (!data.output) {
+        return;
+      }
+      checkForPasswordPrompt(data.output);
+      appendMessage({
+        role: "server",
+        content: data.output,
+        isError: data.isError,
+      });
+    },
+    [appendMessage, checkForPasswordPrompt],
+  );
+
+  const handleShellEvent = React.useCallback(
+    (data: { ok: boolean; active?: boolean; message?: string }) => {
+      if (typeof data.active === "boolean") {
+        setIsShellActive(data.active);
+        if (!data.active) {
+          setShouldMaskNextInput(false);
+        }
+      } else if (!data.ok) {
+        setIsShellActive(false);
+        setShouldMaskNextInput(false);
+      }
+      setIsShellToggling(false);
       if (data.message) {
         appendMessage({
           role: "server",
@@ -81,10 +118,35 @@ const SshConsole: React.FC = () => {
           isError: !data.ok,
         });
       }
-      if (!data.ok) {
-        setIsSendingCommand(false);
-      } else {
+    },
+    [appendMessage],
+  );
+
+
+  React.useEffect(() => {
+    if (!socket) {
+      return;
+    }
+
+    const handleConnection = (data: { ok: boolean; message?: string }) => {
+      setConnectionState(data.ok ? "connected" : "disconnected");
+      setIsShellToggling(false);
+      if (data.ok) {
+        setIsShellActive(false);
+        setIsShellToggling(false);
+        setIsCommandRunning(false);
+        setShouldMaskNextInput(false);
         setFormState((prev) => ({ ...prev, password: "" }));
+      } else {
+        setIsCommandRunning(false);
+        setShouldMaskNextInput(false);
+      }
+      if (data.message) {
+        appendMessage({
+          role: "server",
+          content: data.message,
+          isError: !data.ok,
+        });
       }
     };
 
@@ -94,33 +156,74 @@ const SshConsole: React.FC = () => {
       error_output?: string;
       command?: string;
       message?: string;
+      state?: string;
+      exit_status?: number;
     }) => {
-      setIsSendingCommand(false);
-      if (data.command) {
+      if (data.state === "started") {
+        setIsCommandRunning(true);
+        setShouldMaskNextInput(false);
+        if (data.message) {
+          appendMessage({
+            role: "server",
+            content: data.message,
+            isError: !data.ok,
+          });
+        }
+        return;
+      }
+
+      if (data.state === "input_error") {
+        setIsCommandRunning(false);
+        setShouldMaskNextInput(false);
+        if (data.message) {
+          appendMessage({
+            role: "server",
+            content: data.message,
+            isError: true,
+          });
+        }
+        return;
+      }
+
+      if (!data.state && data.command) {
         appendMessage({ role: "user", content: data.command });
       }
-      if (data.message) {
+
+      if (data.message && data.state !== "stream") {
         appendMessage({
           role: "server",
           content: data.message,
           isError: !data.ok,
         });
+        checkForPasswordPrompt(data.message);
       }
+
       if (data.output) {
         appendMessage({ role: "server", content: data.output });
+        checkForPasswordPrompt(data.output);
       }
+
       if (data.error_output) {
         appendMessage({
           role: "server",
           content: data.error_output,
           isError: true,
         });
+        checkForPasswordPrompt(data.error_output);
+      }
+
+      if (data.state === "finished" || (!data.state && data.message)) {
+        setIsCommandRunning(false);
+        setShouldMaskNextInput(false);
       }
     };
 
     const handleDisconnect = (data: { message?: string }) => {
       setConnectionState("disconnected");
-      setIsSendingCommand(false);
+      setIsCommandRunning(false);
+      setIsShellActive(false);
+      setIsShellToggling(false);
+      setShouldMaskNextInput(false);
       if (data.message) {
         appendMessage({ role: "server", content: data.message, isError: true });
       }
@@ -129,13 +232,17 @@ const SshConsole: React.FC = () => {
     socket.on("ssh_connection_event", handleConnection);
     socket.on("ssh_output", handleOutput);
     socket.on("ssh_disconnected", handleDisconnect);
+    socket.on("ssh_shell_output", handleShellOutput);
+    socket.on("ssh_shell_event", handleShellEvent);
 
     return () => {
       socket.off("ssh_connection_event", handleConnection);
       socket.off("ssh_output", handleOutput);
       socket.off("ssh_disconnected", handleDisconnect);
+      socket.off("ssh_shell_output", handleShellOutput);
+      socket.off("ssh_shell_event", handleShellEvent);
     };
-  }, [appendMessage, socket]);
+  }, [appendMessage, checkForPasswordPrompt, handleShellEvent, handleShellOutput, socket]);
 
   // Emit a disconnect event when the component unmounts or the socket changes.
   React.useEffect(() => {
@@ -173,7 +280,7 @@ const SshConsole: React.FC = () => {
           content: "连接超时，请检查网络或服务器状态后重试。",
           isError: true,
         });
-        setIsSendingCommand(false);
+        setIsCommandRunning(false);
       }
       connectionTimeoutRef.current = null;
     }, 15000);
@@ -192,6 +299,13 @@ const SshConsole: React.FC = () => {
       messageEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [messages]);
+
+  // Ensure the command input receives focus when the session becomes ready.
+  React.useEffect(() => {
+    if (connectionState === "connected" && commandInputRef.current) {
+      commandInputRef.current.focus();
+    }
+  }, [connectionState, isShellActive, isCommandRunning]);
 
   const updateFormState = (
     key: keyof typeof initialFormState,
@@ -238,18 +352,73 @@ const SshConsole: React.FC = () => {
 
   const submitCommand = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!socket || connectionState !== "connected" || !command.trim()) {
+    if (!socket || connectionState !== "connected") {
       return;
     }
-    setIsSendingCommand(true);
+    if (isShellActive) {
+      const dataToSend = `${command}\n`;
+      setCommand("");
+      setHistoryIndex(null);
+      const shouldStoreHistory = Boolean(command) && !shouldMaskNextInput;
+      if (shouldStoreHistory) {
+        setCommandHistory((prev) =>
+          prev.length && prev[prev.length - 1] === command ? prev : [...prev, command],
+        );
+      }
+      if (command) {
+        if (shouldMaskNextInput) {
+          appendMessage({ role: "user", content: "(输入已隐藏)" });
+          setShouldMaskNextInput(false);
+        } else {
+          appendMessage({ role: "user", content: command });
+        }
+      } else {
+        appendMessage({ role: "user", content: "(发送空行)" });
+        if (shouldMaskNextInput) {
+          setShouldMaskNextInput(false);
+        }
+      }
+      socket.emit("ssh_shell_input", { data: dataToSend });
+      return;
+    }
+
+    if (isCommandRunning) {
+      const dataToSend = `${command}\n`;
+      setCommand("");
+      setHistoryIndex(null);
+      if (command) {
+        if (shouldMaskNextInput) {
+          appendMessage({ role: "user", content: "(输入已隐藏)" });
+        } else {
+          appendMessage({ role: "user", content: command });
+          setCommandHistory((prev) =>
+            prev.length && prev[prev.length - 1] === command ? prev : [...prev, command],
+          );
+        }
+      } else {
+        appendMessage({ role: "user", content: "(发送空行)" });
+      }
+      if (shouldMaskNextInput) {
+        setShouldMaskNextInput(false);
+      }
+      socket.emit("ssh_command_input", { data: dataToSend });
+      return;
+    }
+
+    if (!command.trim()) {
+      return;
+    }
     const trimmedCommand = command.trim();
     setCommand("");
+    setShouldMaskNextInput(false);
     setCommandHistory((prev) =>
       prev.length && prev[prev.length - 1] === trimmedCommand
         ? prev
         : [...prev, trimmedCommand],
     );
     setHistoryIndex(null);
+    appendMessage({ role: "user", content: trimmedCommand });
+    setIsCommandRunning(true);
     socket.emit("ssh_command", {
       command: trimmedCommand,
     });
@@ -371,9 +540,34 @@ const SshConsole: React.FC = () => {
           >
             {connectionState === "connecting" ? "取消连接" : "断开"}
           </button>
+          <button
+            type="button"
+            className="rounded bg-purple-600 px-3 py-2 text-xs font-semibold tracking-wide text-white hover:bg-purple-500 disabled:cursor-not-allowed disabled:bg-purple-900"
+            onClick={() => {
+              if (!socket || connectionState !== "connected") {
+                return;
+              }
+              setIsShellToggling(true);
+              if (isShellActive) {
+                socket.emit("ssh_shell_stop");
+              } else {
+                socket.emit("ssh_shell_start", {});
+              }
+            }}
+            disabled={connectionState !== "connected" || isShellToggling}
+          >
+            {isShellActive
+              ? isShellToggling
+                ? "停止交互中..."
+                : "停止交互"
+              : isShellToggling
+              ? "开启交互中..."
+              : "开启交互"}
+          </button>
         </div>
         <div className="flex items-end text-xs text-gray-400 md:justify-end">
           当前状态：{statusLabels[connectionState]}
+          {isShellActive && connectionState === "connected" && " · 交互式会话已启用"}
         </div>
       </form>
 
@@ -411,7 +605,13 @@ const SshConsole: React.FC = () => {
             value={command}
             placeholder={
               connectionState === "connected"
-                ? "输入要执行的命令并回车"
+                ? isShellActive
+                  ? "交互模式：输入内容后回车发送"
+                  : isCommandRunning
+                  ? shouldMaskNextInput
+                    ? "命令正在等待密码，请输入后回车"
+                    : "命令正在执行，可输入附加内容后回车"
+                  : "输入要执行的命令并回车"
                 : "请先连接到 SSH 服务器"
             }
             onChange={(event) => {
@@ -420,13 +620,20 @@ const SshConsole: React.FC = () => {
             }}
             disabled={connectionState !== "connected"}
             onKeyDown={handleCommandKeyDown}
+            ref={commandInputRef}
           />
           <button
-            className="rounded bg-blue-600 px-3 py-2 text-xs font-semibold tracking-wide text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-900"
+            className="rounded bg-blue-600 px-3 py-2 text-xs font-semibold tracking-wide text白 hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-900"
             type="submit"
-            disabled={connectionState !== "connected" || isSendingCommand}
+            disabled={connectionState !== "connected" || isShellToggling}
           >
-            {isSendingCommand ? "执行中..." : "发送"}
+            {isShellActive
+              ? "发送"
+              : isCommandRunning
+              ? shouldMaskNextInput
+                ? "提交密码"
+                : "发送输入"
+              : "发送"}
           </button>
         </div>
       </form>

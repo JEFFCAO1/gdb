@@ -1,8 +1,8 @@
+# gdbgui/server/app.py
 import binascii
 import logging
 import os
 import socket
-from typing import Dict, List
 from dataclasses import dataclass, field
 from threading import Event, Lock
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -54,9 +54,27 @@ socketio = SocketIO(manage_session=False)
 
 
 @dataclass
+class ActiveCommand:
+    command: str
+    stdin: Any
+    stdout: Any
+    stderr: Any
+    channel: "paramiko.Channel"
+    stop_event: Event = field(default_factory=Event)
+    termination_message: Optional[str] = None
+    terminated_with_error: bool = False
+
+
+@dataclass
 class SshSession:
     client: ParamikoSSHClient
     command_lock: Lock = field(default_factory=Lock)
+    shell_lock: Lock = field(default_factory=Lock)
+    shell_channel: Optional["paramiko.Channel"] = None
+    shell_stop_event: Optional[Event] = None
+    shell_task: Optional[Any] = None
+    command_task: Optional[Any] = None
+    active_command: Optional[ActiveCommand] = None
 
 
 ssh_clients: Dict[str, SshSession] = {}
@@ -104,6 +122,256 @@ def _emit_to_client(event: str, payload: Dict[str, Any], client_id: str) -> None
     )
 
 
+def _get_ssh_session(client_id: str) -> Optional[SshSession]:
+    with ssh_clients_lock:
+        return ssh_clients.get(client_id)
+
+
+def _stop_active_command(
+    session: SshSession, client_id: str, *, message: Optional[str] = None, error: bool = False
+) -> None:
+    with session.command_lock:
+        active_command = session.active_command
+    if active_command is None:
+        return
+
+    active_command.termination_message = message
+    active_command.terminated_with_error = error
+    active_command.stop_event.set()
+
+    try:
+        active_command.channel.close()
+    except Exception:
+        logger.debug("Failed to close ssh command channel", exc_info=True)
+
+def _stop_shell(session: SshSession, client_id: str, message: Optional[str] = None) -> None:
+    with session.shell_lock:
+        stop_event = session.shell_stop_event
+        channel = session.shell_channel
+        session.shell_stop_event = None
+        session.shell_channel = None
+        session.shell_task = None
+
+    if stop_event is not None:
+        stop_event.set()
+    if channel is not None:
+        try:
+            channel.close()
+        except Exception:
+            logger.debug("Failed to close interactive shell channel", exc_info=True)
+
+    if message:
+        _emit_to_client(
+            "ssh_shell_event",
+            {"ok": True, "active": False, "message": message},
+            client_id,
+        )
+
+
+def _shell_output_worker(client_id: str) -> None:
+    while True:
+        session = _get_ssh_session(client_id)
+        if session is None:
+            break
+
+        with session.shell_lock:
+            channel = session.shell_channel
+            stop_event = session.shell_stop_event
+
+        if channel is None or stop_event is None:
+            break
+
+        if stop_event.is_set():
+            break
+
+        try:
+            stdout_data = b""
+            while channel.recv_ready():
+                stdout_data += channel.recv(4096)
+
+            stderr_data = b""
+            while channel.recv_stderr_ready():
+                stderr_data += channel.recv_stderr(4096)
+
+            if stdout_data:
+                _emit_to_client(
+                    "ssh_shell_output",
+                    {
+                        "output": stdout_data.decode("utf-8", errors="ignore"),
+                        "isError": False,
+                    },
+                    client_id,
+                )
+
+            if stderr_data:
+                _emit_to_client(
+                    "ssh_shell_output",
+                    {
+                        "output": stderr_data.decode("utf-8", errors="ignore"),
+                        "isError": True,
+                    },
+                    client_id,
+                )
+
+            if channel.closed or channel.exit_status_ready():
+                _stop_shell(session, client_id)
+                _emit_to_client(
+                    "ssh_shell_event",
+                    {
+                        "ok": False,
+                        "active": False,
+                        "message": "交互式会话已结束。",
+                    },
+                    client_id,
+                )
+                break
+
+        except socket.timeout:
+            pass
+        except Exception:
+            logger.exception("Unexpected error while reading ssh shell output")
+            _stop_shell(session, client_id)
+            _emit_to_client(
+                "ssh_shell_event",
+                {
+                    "ok": False,
+                    "active": False,
+                    "message": "读取交互式会话输出时发生错误。",
+                },
+                client_id,
+            )
+            break
+
+        socketio.sleep(0.05)
+
+
+def _command_output_worker(client_id: str, command: str) -> None:
+    session = _get_ssh_session(client_id)
+    if session is None:
+        return
+
+    with session.command_lock:
+        active_command = session.active_command
+    if active_command is None:
+        return
+
+    channel = active_command.channel
+    exit_status: Optional[int] = None
+    error_message: Optional[str] = None
+
+    try:
+        channel.settimeout(0.0)
+    except Exception:
+        logger.debug("Failed to set non-blocking mode on command channel", exc_info=True)
+
+    try:
+        while not active_command.stop_event.is_set():
+            stdout_data = b""
+            try:
+                while channel.recv_ready():
+                    stdout_data += channel.recv(4096)
+            except socket.timeout:
+                pass
+
+            if stdout_data:
+                _emit_to_client(
+                    "ssh_output",
+                    {
+                        "ok": True,
+                        "output": stdout_data.decode("utf-8", errors="ignore"),
+                        "state": "stream",
+                        "command": command,
+                    },
+                    client_id,
+                )
+
+            stderr_data = b""
+            try:
+                while channel.recv_stderr_ready():
+                    stderr_data += channel.recv_stderr(4096)
+            except socket.timeout:
+                pass
+
+            if stderr_data:
+                _emit_to_client(
+                    "ssh_output",
+                    {
+                        "ok": False,
+                        "error_output": stderr_data.decode("utf-8", errors="ignore"),
+                        "state": "stream",
+                        "command": command,
+                    },
+                    client_id,
+                )
+
+            if channel.closed:
+                break
+
+            if channel.exit_status_ready():
+                try:
+                    exit_status = channel.recv_exit_status()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Failed to read exit status", exc_info=True)
+                    error_message = f"获取命令退出状态失败: {exc}"
+                break
+
+            socketio.sleep(0.05)
+
+    except Exception:
+        logger.exception("Unexpected error while executing ssh command")
+        error_message = "执行命令时发生未预期的错误。"
+
+    finally:
+        try:
+            active_command.stdin.close()
+        except Exception:
+            logger.debug("Failed to close command stdin", exc_info=True)
+        try:
+            active_command.stdout.close()
+        except Exception:
+            logger.debug("Failed to close command stdout", exc_info=True)
+        try:
+            active_command.stderr.close()
+        except Exception:
+            logger.debug("Failed to close command stderr", exc_info=True)
+
+        with session.command_lock:
+            if session.active_command is active_command:
+                session.active_command = None
+                session.command_task = None
+
+    payload: Dict[str, Any] = {
+        "state": "finished",
+        "command": command,
+    }
+
+    if active_command.termination_message:
+        payload.update(
+            {
+                "ok": not active_command.terminated_with_error,
+                "message": active_command.termination_message,
+            }
+        )
+    else:
+        if exit_status is not None:
+            payload.update(
+                {
+                    "ok": exit_status == 0,
+                    "exit_status": exit_status,
+                    "message": (
+                        "命令已完成。"
+                        if exit_status == 0
+                        else f"命令已完成，退出状态 {exit_status}。"
+                    ),
+                }
+            )
+        elif error_message:
+            payload.update({"ok": False, "message": error_message})
+        else:
+            payload.update({"ok": True, "message": "命令已完成。"})
+
+    _emit_to_client("ssh_output", payload, client_id)
+
 def cancel_pending_connection(client_id: str) -> Optional[PendingSshConnection]:
     with pending_ssh_connections_lock:
         pending = pending_ssh_connections.pop(client_id, None)
@@ -126,6 +394,11 @@ def close_ssh_connection(client_id: str, message: Optional[str] = None) -> None:
 
     connection_closed = session is not None
     ssh_client = session.client if session else None
+    if session is not None:
+        _stop_active_command(
+            session, client_id, message="命令已因连接关闭而终止。", error=True
+        )
+        _stop_shell(session, client_id)
     if connection_closed and ssh_client is not None:
         try:
             ssh_client.close()
@@ -439,58 +712,224 @@ def ssh_command(message: Dict[str, Optional[str]]):
         )
         return
 
-    stdout = None
-    stderr = None
-    try:
-        with session.command_lock:
-            stdin, stdout, stderr = session.client.exec_command(
-                command, get_pty=True, timeout=30
+    with session.command_lock:
+        if session.active_command is not None:
+            emit(
+                "ssh_output",
+                {
+                    "ok": False,
+                    "message": "上一个命令仍在执行中，请完成后再试。",
+                    "command": command,
+                },
             )
-            stdin.close()
-            output = stdout.read().decode("utf-8", errors="ignore")
-            error_output = stderr.read().decode("utf-8", errors="ignore")
-    except socket.timeout:
-        emit(
-            "ssh_output",
-            {
-                "ok": False,
-                "message": "命令执行超时。",
-                "command": command,
-            },
-        )
-        return
-    except Exception as exc:
-        emit(
-            "ssh_output",
-            {
-                "ok": False,
-                "message": f"执行命令失败: {exc}",
-                "command": command,
-            },
-        )
-        return
+            return
 
-    finally:
-        if stdout is not None:
-            try:
-                stdout.close()
-            except Exception:
-                logger.debug("Failed to close stdout for ssh command", exc_info=True)
-        if stderr is not None:
-            try:
-                stderr.close()
-            except Exception:
-                logger.debug("Failed to close stderr for ssh command", exc_info=True)
+        try:
+            stdin, stdout, stderr = session.client.exec_command(
+                command, get_pty=True
+            )
+        except Exception as exc:
+            emit(
+                "ssh_output",
+                {
+                    "ok": False,
+                    "message": f"执行命令失败: {exc}",
+                    "command": command,
+                },
+            )
+            return
+
+        session.active_command = ActiveCommand(
+            command=command,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            channel=stdout.channel,
+        )
+        session.command_task = socketio.start_background_task(
+            _command_output_worker, client_id, command
+        )
 
     emit(
         "ssh_output",
-        {
-            "ok": True,
-            "output": output,
-            "error_output": error_output,
-            "command": command,
-        },
+        {"ok": True, "command": command, "state": "started"},
     )
+
+
+@socketio.on("ssh_shell_start", namespace="/gdb_listener")
+def ssh_shell_start(message: Dict[str, Any]):
+    client_id = request.sid
+
+    if not PARAMIKO_AVAILABLE:
+        emit(
+            "ssh_shell_event",
+            {
+                "ok": False,
+                "active": False,
+                "message": "服务器未启用 SSH 支持，无法开启交互式会。",
+            },
+        )
+        return
+
+    session = _get_ssh_session(client_id)
+    if session is None:
+        emit(
+            "ssh_shell_event",
+            {
+                "ok": False,
+                "active": False,
+                "message": "尚未建立 SSH 连接。",
+            },
+        )
+        return
+
+    with session.shell_lock:
+        existing_channel = session.shell_channel
+        existing_stop_event = session.shell_stop_event
+        if existing_channel is not None and existing_stop_event is not None:
+            if not existing_stop_event.is_set() and not existing_channel.closed:
+                emit(
+                    "ssh_shell_event",
+                    {
+                        "ok": True,
+                        "active": True,
+                        "message": "交互式会话已就绪。",
+                    },
+                )
+                return
+
+    try:
+        channel = session.client.invoke_shell()
+        channel.settimeout(0.0)
+    except Exception as exc:
+        logger.exception("Failed to open interactive shell")
+        emit(
+            "ssh_shell_event",
+            {
+                "ok": False,
+                "active": False,
+                "message": f"无法开启交互式会话: {exc}",
+            },
+        )
+        return
+
+    stop_event = Event()
+    with session.shell_lock:
+        session.shell_channel = channel
+        session.shell_stop_event = stop_event
+        session.shell_task = socketio.start_background_task(
+            _shell_output_worker, client_id
+        )
+
+    emit(
+        "ssh_shell_event",
+        {"ok": True, "active": True, "message": "交互式会话已启动。"},
+    )
+
+
+@socketio.on("ssh_shell_input", namespace="/gdb_listener")
+def ssh_shell_input(message: Dict[str, Any]):
+    client_id = request.sid
+    data = message.get("data")
+    if data is None:
+        data = ""
+
+    session = _get_ssh_session(client_id)
+    if session is None:
+        emit(
+            "ssh_shell_event",
+            {
+                "ok": False,
+                "active": False,
+                "message": "尚未建立 SSH 连接。",
+            },
+        )
+        return
+
+    with session.shell_lock:
+        channel = session.shell_channel
+        stop_event = session.shell_stop_event
+
+    if channel is None or stop_event is None or stop_event.is_set():
+        emit(
+            "ssh_shell_event",
+            {
+                "ok": False,
+                "active": False,
+                "message": "交互式会话尚未启动。",
+            },
+        )
+        return
+
+    try:
+        channel.send(data)
+    except Exception:
+        logger.exception("Failed to send data to interactive shell")
+        _stop_shell(session, client_id)
+        emit(
+            "ssh_shell_event",
+            {
+                "ok": False,
+                "active": False,
+                "message": "向交互式会话发送数据时出错，连接已关闭。",
+            },
+        )
+
+
+@socketio.on("ssh_shell_stop", namespace="/gdb_listener")
+def ssh_shell_stop():
+    client_id = request.sid
+    session = _get_ssh_session(client_id)
+    if session is None:
+        return
+
+    _stop_shell(session, client_id, message="交互式会话已停止。")
+
+
+@socketio.on("ssh_command_input", namespace="/gdb_listener")
+def ssh_command_input(message: Dict[str, Any]):
+    client_id = request.sid
+    data = message.get("data")
+    if data is None:
+        data = ""
+
+    session = _get_ssh_session(client_id)
+    if session is None:
+        emit(
+            "ssh_output",
+            {
+                "ok": False,
+                "message": "尚未建立 SSH 连接。",
+                "state": "input_error",
+            },
+        )
+        return
+
+    with session.command_lock:
+        active_command = session.active_command
+
+    if active_command is None:
+        emit(
+            "ssh_output",
+            {
+                "ok": False,
+                "message": "当前没有正在运行的命令。",
+                "state": "input_error",
+            },
+        )
+        return
+
+    try:
+        active_command.stdin.write(data)
+        active_command.stdin.flush()
+    except Exception:
+        logger.exception("Failed to write to ssh command stdin")
+        _stop_active_command(
+            session,
+            client_id,
+            message="向命令发送输入时出现错误，命令已终止。",
+            error=True,
+        )
 
 
 @socketio.on("ssh_disconnect", namespace="/gdb_listener")
