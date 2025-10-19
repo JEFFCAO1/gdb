@@ -4,19 +4,19 @@ import "../../static/css/tailwind.css";
 import "./initGlobals";
 import SshConsole from "./SshConsole";
 import GdbApi from "./GdbApi";
+import SplitPane from "react-split-pane";
 
 function ChatSidebar({
   onCollectPty,
   injectedMessage,
   className,
   getCollectedData,
-  showStraceOption = false,
+
 }: {
   onCollectPty: () => void;
   injectedMessage?: string | null;
   className?: string | "w-80";
   getCollectedData?: () => Promise<string | null>;
-  showStraceOption?: boolean;
 }) {
   const [messages, setMessages] = React.useState([
     { sender: "ai", text: "Hi! I'm your AI assistant. How can I help you today?" },
@@ -27,6 +27,7 @@ function ChatSidebar({
   const [autoCollect, setAutoCollect] = React.useState(false);
   const [straceChecked, setStraceChecked] = React.useState(false);
   const [waitingForCollection, setWaitingForCollection] = React.useState(false);
+  const [conversationId, setConversationId] = React.useState<string | null>(null);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const collectionPromiseRef = React.useRef<{
     resolve: (value: { [key: string]: string } | null) => void;
@@ -172,9 +173,19 @@ function ChatSidebar({
     }
 
     try {
+      const inputs: { [key: string]: string } = structuredDebugContext || {};
+      // Inject persisted analysis if available
+      try {
+        const persistedAnalysis = localStorage.getItem('gdbgui_analysis');
+        if (persistedAnalysis && !inputs.Analysis) {
+          inputs.Analysis = persistedAnalysis;
+        }
+      } catch (e) {
+        console.debug('No persisted analysis found or failed to read');
+      }
       const payload = {
         query: input,
-        inputs: structuredDebugContext || {},
+        inputs,
       };
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -183,7 +194,11 @@ function ChatSidebar({
       });
       if (!res.ok) throw new Error("API error: " + res.status);
       const data = await res.json();
-      setMessages((msgs) => [...msgs, { sender: "ai", text: data.reply || "[No reply]" }]);
+      
+      setMessages((msgs) => [
+        ...msgs,
+        { sender: "ai", text: data.reply || "[No reply]" },
+      ]);
     } catch (e: any) {
       setError(e?.message || "Unknown error");
       setMessages((msgs) => [...msgs, { sender: "ai", text: "Sorry, I couldn't process your request." }]);
@@ -235,31 +250,25 @@ function ChatSidebar({
       {/* Display an error banner if an error occurred */}
       {error && <div className="text-red-600 text-xs px-2 pb-1">{error}</div>}
       {/* Auto-collect and strace checkboxes */}
-      <div className="px-2 py-1 border-t bg-gray-50 flex flex-col gap-1">
-        {/* 只有在非 strace 页面时显示 GDB 勾选框 */}
-        {!showStraceOption && (
-          <label className="flex items-center gap-2 text-xs text-gray-600">
-            <input
-              type="checkbox"
-              checked={autoCollect}
-              onChange={(e) => setAutoCollect(e.target.checked)}
-              className="rounded"
-            />
-            GDB
-          </label>
-        )}
-        {/* 在 strace 页面时只显示 strace 勾选框 */}
-        {showStraceOption && (
-          <label className="flex items-center gap-2 text-xs text-gray-600">
-            <input
-              type="checkbox"
-              checked={straceChecked}
-              onChange={(e) => setStraceChecked(e.target.checked)}
-              className="rounded"
-            />
-            strace
-          </label>
-        )}
+      <div className="px-2 py-1 border-t bg-gray-50 flex flex-row gap-1">
+        <label className="flex items-center gap-2 text-xs text-gray-600">
+          <input
+            type="checkbox"
+            checked={autoCollect}
+            onChange={(e) => setAutoCollect(e.target.checked)}
+            className="rounded"
+          />
+          GDB
+        </label>
+        <label className="flex items-center gap-2 text-xs text-gray-600">
+          <input
+            type="checkbox"
+            checked={straceChecked}
+            onChange={(e) => setStraceChecked(e.target.checked)}
+            className="rounded"
+          />
+          strace
+        </label>
       </div>
       <div className="p-2 border-t flex gap-2">
         <input
@@ -456,11 +465,23 @@ export default function ToolsTabs() {
   const tabs = [
     { label: "GDB", id: "gdb" },
     { label: "strace", id: "strace" },
+    { label: "valgrind", id: "valgrind" },
     { label: "top", id: "top" },
     { label: "perfetto", id: "perfetto" },
   ];
 
   const StracePanel = ({ visible }: { visible: boolean }) => {
+    if (!visible) return null;
+    return (
+      <div className="flex h-full w-full min-h-0">
+        <div className="flex-1 min-w-0 overflow-hidden border-r border-gray-200 bg-black">
+          <SshConsole />
+        </div>
+      </div>
+    );
+  };
+
+  const ValgrindPanel = ({ visible }: { visible: boolean }) => {
     if (!visible) return null;
     return (
       <div className="flex h-full w-full min-h-0">
@@ -504,12 +525,36 @@ export default function ToolsTabs() {
   );
 
   return (
-    <div className="h-screen flex flex-row">
-      {/* Left side: tool panels and tab navigation. Always use a column flex
-         layout so child panels can stretch vertically. The width of this
-         section shrinks on the strace tab implicitly because the chat
-         sidebar grows to fill the remaining space. */}
-      <div className="flex-1 flex flex-col h-screen min-w-0">
+    <SplitPane
+      split="vertical"
+      minSize={320}
+      defaultSize={"60%"}
+      style={{ height: "100vh" }}
+      paneStyle={{ display: "flex", flexDirection: "column", height: "100%" }}
+      pane1Style={{ minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}
+      pane2Style={{ minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}
+      resizerStyle={{
+        background: "#e5e7eb",
+        width: "8px",
+        cursor: "col-resize",
+        zIndex: 9999,
+        pointerEvents: "auto",
+      }}
+      onDragStarted={() => {
+        // 禁用所有 iframe 的鼠标事件
+        document.querySelectorAll("iframe").forEach((el) => {
+          (el as HTMLIFrameElement).style.pointerEvents = "none";
+        });
+      }}
+      onDragFinished={() => {
+        // 恢复所有 iframe 的鼠标事件
+        document.querySelectorAll("iframe").forEach((el) => {
+          (el as HTMLIFrameElement).style.pointerEvents = "";
+        });
+      }}
+    >
+      {/* 左侧工具区 */}
+      <div className="flex flex-col h-full min-w-0">
         {/* Tabs as navbar at the top */}
         <div className="flex border-b bg-white">
           {tabs.map((tab) => (
@@ -528,21 +573,22 @@ export default function ToolsTabs() {
         <div className="flex-1 min-h-0 bg-gray-50 overflow-hidden relative">
           <GdbPanel ref={gdbIframeRef} visible={active === "gdb"} />
           <StracePanel visible={active === "strace"} />
+          <ValgrindPanel visible={active === "valgrind"} />
           <TopPanel visible={active === "top"} />
           <PerfettoPanel visible={active === "perfetto"} />
         </div>
       </div>
-      {/* Right side: always show the chat sidebar. When the strace tab is
-         active we allow the chat to grow by applying flex styles; on
-         other tabs we stick to the default fixed width provided by
-         ChatSidebar. */}
+      {/* 右侧 AI Chat */}
       <ChatSidebar
         onCollectPty={handleCollectPty}
         injectedMessage={ptyMessage}
-        className={isStrace ? "flex-1 min-w-0" : undefined}
+        className={isStrace ? "flex-1 min-w-0" : "min-w-0"}
         getCollectedData={getCollectedData}
-        showStraceOption={isStrace}
       />
-    </div>
+    </SplitPane>
   );
 }
+// .SplitPane .Resizer {
+//   z-index: 9999 !important;
+//   pointer-events: auto !important;
+// }

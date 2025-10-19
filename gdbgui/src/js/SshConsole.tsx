@@ -27,6 +27,263 @@ const statusLabels: Record<SshConnectionState, string> = {
 
 const passwordPromptRegex = /(password|passphrase|密码)\s*[:：]?\s*$/i;
 
+const CSI_FINAL_MIN = 0x40;
+const CSI_FINAL_MAX = 0x7e;
+const CSI_PARAMETER_MIN = 0x30;
+const CSI_PARAMETER_MAX = 0x3f;
+const CSI_INTERMEDIATE_MIN = 0x20;
+const CSI_INTERMEDIATE_MAX = 0x2f;
+
+type TerminalSanitizerState = {
+  pending: string;
+  currentLine: string;
+  emittedLength: number;
+};
+
+const ansiGeneralPattern =
+  /\u001B\[[0-9;?]*[ -/]*[@-~]|\u001B[@-Z\\-_]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g;
+const controlCharsPattern = /[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F]/g;
+
+const stripAnsi = (value: string): string =>
+  value.replace(ansiGeneralPattern, "").replace(controlCharsPattern, "");
+
+const isControlCode = (code: number): boolean => {
+  if (code >= 0 && code <= 8) {
+    return true;
+  }
+  if (code === 11 || code === 12 || code === 127) {
+    return true;
+  }
+  return code >= 14 && code <= 31;
+};
+
+const consumeCsiSequence = (input: string, start: number, index: number): number | null => {
+  let cursor = index;
+
+  while (cursor < input.length) {
+    const code = input.charCodeAt(cursor);
+    if (code >= CSI_FINAL_MIN && code <= CSI_FINAL_MAX) {
+      return cursor - start + 1;
+    }
+    const isParameter = code >= CSI_PARAMETER_MIN && code <= CSI_PARAMETER_MAX;
+    const isIntermediate = code >= CSI_INTERMEDIATE_MIN && code <= CSI_INTERMEDIATE_MAX;
+    if (!isParameter && !isIntermediate) {
+      return cursor - start + 1;
+    }
+    cursor += 1;
+  }
+
+  return null;
+};
+
+const consumeOscSequence = (input: string, start: number): number | null => {
+  let cursor = start;
+
+  while (cursor < input.length) {
+    const code = input.charCodeAt(cursor);
+    if (code === 0x07) {
+      return cursor - (start - 2) + 1;
+    }
+    if (code === 0x1b && input[cursor + 1] === "\\") {
+      return cursor - (start - 2) + 2;
+    }
+    if (code === 0x9c) {
+      return cursor - (start - 2) + 1;
+    }
+    cursor += 1;
+  }
+
+  return null;
+};
+
+const consumeStTerminatedSequence = (input: string, start: number): number | null => {
+  let cursor = start;
+
+  while (cursor < input.length) {
+    const code = input.charCodeAt(cursor);
+    if (code === 0x1b && input[cursor + 1] === "\\") {
+      return cursor - (start - 2) + 2;
+    }
+    if (code === 0x9c) {
+      return cursor - (start - 2) + 1;
+    }
+    cursor += 1;
+  }
+
+  return null;
+};
+
+const consumeSimpleEscape = (input: string, start: number): number | null => {
+  let cursor = start + 1;
+
+  while (cursor < input.length) {
+    const code = input.charCodeAt(cursor);
+    if (code >= 0x30 && code <= 0x7e) {
+      return cursor - start + 1;
+    }
+    if (code < 0x20 || code > 0x2f) {
+      return cursor - start + 1;
+    }
+    cursor += 1;
+  }
+
+  return null;
+};
+
+const consumeEscapeSequence = (input: string, start: number): number | null => {
+  const first = input[start];
+
+  if (first === "\u009b") {
+    return consumeCsiSequence(input, start, start + 1);
+  }
+
+  if (first !== "\u001b") {
+    return 1;
+  }
+
+  const next = input[start + 1];
+  if (next === undefined) {
+    return null;
+  }
+
+  if (next === "[") {
+    return consumeCsiSequence(input, start, start + 2);
+  }
+
+  if (next === "]") {
+    return consumeOscSequence(input, start + 2);
+  }
+
+  if (next === "P" || next === "^" || next === "_" || next === "X") {
+    return consumeStTerminatedSequence(input, start + 2);
+  }
+
+  return consumeSimpleEscape(input, start);
+};
+
+const stripAnsiAndControls = (
+  chunk: string,
+  pending: string,
+): { clean: string; remainder: string } => {
+  if (!pending && !chunk) {
+    return { clean: "", remainder: "" };
+  }
+
+  const data = pending ? pending + chunk : chunk;
+  let clean = "";
+  let index = 0;
+
+  while (index < data.length) {
+    const char = data[index];
+
+    if (char === "\u001b" || char === "\u009b") {
+      const consumed = consumeEscapeSequence(data, index);
+      if (consumed === null) {
+        return { clean, remainder: data.slice(index) };
+      }
+      index += consumed;
+      continue;
+    }
+
+    const code = data.charCodeAt(index);
+    if (isControlCode(code)) {
+      index += 1;
+      continue;
+    }
+
+    clean += char;
+    index += 1;
+  }
+
+  return { clean, remainder: "" };
+};
+
+const applyCarriageControl = (
+  value: string,
+  state: TerminalSanitizerState,
+): string => {
+  if (!value) {
+    return "";
+  }
+
+  let result = "";
+  let { currentLine, emittedLength } = state;
+  let index = 0;
+
+  const flushPartialLine = () => {
+    const delta = currentLine.slice(emittedLength);
+    if (delta) {
+      result += delta;
+    }
+    emittedLength = currentLine.length;
+  };
+
+  while (index < value.length) {
+    const char = value[index];
+
+    if (char === "\r") {
+      if (index + 1 < value.length && value[index + 1] === "\n") {
+        flushPartialLine();
+        result += "\n";
+        currentLine = "";
+        emittedLength = 0;
+        index += 2;
+        continue;
+      }
+      const hadLineContent = emittedLength > 0 || currentLine.length > 0;
+      flushPartialLine();
+      if (hadLineContent && !result.endsWith("\n")) {
+        result += "\n";
+      }
+      currentLine = "";
+      emittedLength = 0;
+      index += 1;
+      continue;
+    }
+
+    if (char === "\n") {
+      flushPartialLine();
+      result += "\n";
+      currentLine = "";
+      emittedLength = 0;
+      index += 1;
+      continue;
+    }
+
+    currentLine += char;
+    index += 1;
+  }
+
+  flushPartialLine();
+
+  state.currentLine = currentLine;
+  state.emittedLength = emittedLength;
+
+  return result;
+};
+
+const sanitizeChunk = (raw: string, state: TerminalSanitizerState): string => {
+  const { clean, remainder } = stripAnsiAndControls(raw, state.pending);
+  state.pending = remainder;
+  return applyCarriageControl(clean, state);
+};
+
+const prepareDisplayContent = (
+  raw: string | undefined,
+  state: TerminalSanitizerState,
+): string | null => {
+  if (!raw) {
+    return null;
+  }
+
+  const sanitized = sanitizeChunk(raw, state);
+  if (sanitized) {
+    return sanitized;
+  }
+
+  return /\r?\n/.test(raw) ? "\n" : null;
+};
+
 const SshConsole: React.FC = () => {
   // Keep the socket in state so that it can be updated once GdbApi initialises.
   const [socket, setSocket] = React.useState<any>(GdbApi.getSocket());
@@ -44,6 +301,37 @@ const SshConsole: React.FC = () => {
   const messageEndRef = React.useRef<HTMLDivElement | null>(null);
   const commandInputRef = React.useRef<HTMLInputElement | null>(null);
   const connectionTimeoutRef = React.useRef<number | null>(null);
+  const commandSanitizerRef = React.useRef<TerminalSanitizerState>({
+    pending: "",
+    currentLine: "",
+    emittedLength: 0,
+  });
+  const shellSanitizerRef = React.useRef<TerminalSanitizerState>({
+    pending: "",
+    currentLine: "",
+    emittedLength: 0,
+  });
+
+  const resetSanitizers = React.useCallback(() => {
+    commandSanitizerRef.current.pending = "";
+    commandSanitizerRef.current.currentLine = "";
+    commandSanitizerRef.current.emittedLength = 0;
+    shellSanitizerRef.current.pending = "";
+    shellSanitizerRef.current.currentLine = "";
+    shellSanitizerRef.current.emittedLength = 0;
+  }, []);
+
+  const sanitizeForDisplay = React.useCallback(
+    (raw: string | undefined, state: TerminalSanitizerState): string | null =>
+      prepareDisplayContent(raw, state),
+    [],
+  );
+
+  const sanitizeEphemeral = React.useCallback(
+    (raw: string | undefined): string | null =>
+      prepareDisplayContent(raw, { pending: "", currentLine: "", emittedLength: 0 }),
+    [],
+  );
 
   React.useEffect(() => {
     if (!socket) {
@@ -63,13 +351,36 @@ const SshConsole: React.FC = () => {
   }, [socket]);
 
   const appendMessage = React.useCallback((message: Omit<Message, "id">) => {
-    setMessages((prevMessages) => [
-      ...prevMessages,
-      {
-        ...message,
-        id: nextMessageIdRef.current++,
-      },
-    ]);
+    setMessages((prevMessages) => {
+      if (prevMessages.length && message.role === "server") {
+        const lastMessage = prevMessages[prevMessages.length - 1];
+        const sameRole = lastMessage.role === message.role;
+        const sameError = Boolean(lastMessage.isError) === Boolean(message.isError);
+
+        if (sameRole && sameError) {
+          const mergedMessages = [...prevMessages];
+          const trailingNewline = lastMessage.content.endsWith("\n");
+          const incomingContent = message.content;
+          const combinedContent = trailingNewline || incomingContent.startsWith("\n")
+            ? `${lastMessage.content}${incomingContent}`
+            : `${lastMessage.content}\n${incomingContent}`;
+
+          mergedMessages[mergedMessages.length - 1] = {
+            ...lastMessage,
+            content: combinedContent,
+          };
+          return mergedMessages;
+        }
+      }
+
+      return [
+        ...prevMessages,
+        {
+          ...message,
+          id: nextMessageIdRef.current++,
+        },
+      ];
+    });
   }, []);
 
   const [shouldMaskNextInput, setShouldMaskNextInput] = React.useState(false);
@@ -86,17 +397,18 @@ const SshConsole: React.FC = () => {
 
   const handleShellOutput = React.useCallback(
     (data: { output?: string; isError?: boolean }) => {
-      if (!data.output) {
+      const displayContent = sanitizeForDisplay(data.output, shellSanitizerRef.current);
+      if (displayContent === null) {
         return;
       }
-      checkForPasswordPrompt(data.output);
+      checkForPasswordPrompt(displayContent);
       appendMessage({
         role: "server",
-        content: data.output,
+        content: displayContent,
         isError: data.isError,
       });
     },
-    [appendMessage, checkForPasswordPrompt],
+    [appendMessage, checkForPasswordPrompt, sanitizeForDisplay],
   );
 
   const handleShellEvent = React.useCallback(
@@ -105,23 +417,27 @@ const SshConsole: React.FC = () => {
         setIsShellActive(data.active);
         if (!data.active) {
           setShouldMaskNextInput(false);
+        } else {
+          shellSanitizerRef.current.pending = "";
+          shellSanitizerRef.current.currentLine = "";
+          shellSanitizerRef.current.emittedLength = 0;
         }
       } else if (!data.ok) {
         setIsShellActive(false);
         setShouldMaskNextInput(false);
       }
       setIsShellToggling(false);
-      if (data.message) {
+      const eventMessage = sanitizeEphemeral(data.message);
+      if (eventMessage !== null) {
         appendMessage({
           role: "server",
-          content: data.message,
+          content: eventMessage,
           isError: !data.ok,
         });
       }
     },
-    [appendMessage],
+    [appendMessage, sanitizeEphemeral],
   );
-
 
   React.useEffect(() => {
     if (!socket) {
@@ -137,14 +453,17 @@ const SshConsole: React.FC = () => {
         setIsCommandRunning(false);
         setShouldMaskNextInput(false);
         setFormState((prev) => ({ ...prev, password: "" }));
+        resetSanitizers();
       } else {
         setIsCommandRunning(false);
         setShouldMaskNextInput(false);
+        resetSanitizers();
       }
-      if (data.message) {
+      const messageContent = sanitizeEphemeral(data.message);
+      if (messageContent !== null) {
         appendMessage({
           role: "server",
-          content: data.message,
+          content: messageContent,
           isError: !data.ok,
         });
       }
@@ -162,10 +481,14 @@ const SshConsole: React.FC = () => {
       if (data.state === "started") {
         setIsCommandRunning(true);
         setShouldMaskNextInput(false);
-        if (data.message) {
+        commandSanitizerRef.current.pending = "";
+        commandSanitizerRef.current.currentLine = "";
+        commandSanitizerRef.current.emittedLength = 0;
+        const startedMessage = sanitizeEphemeral(data.message);
+        if (startedMessage !== null) {
           appendMessage({
             role: "server",
-            content: data.message,
+            content: startedMessage,
             isError: !data.ok,
           });
         }
@@ -175,10 +498,11 @@ const SshConsole: React.FC = () => {
       if (data.state === "input_error") {
         setIsCommandRunning(false);
         setShouldMaskNextInput(false);
-        if (data.message) {
+        const inputErrorMessage = sanitizeEphemeral(data.message);
+        if (inputErrorMessage !== null) {
           appendMessage({
             role: "server",
-            content: data.message,
+            content: inputErrorMessage,
             isError: true,
           });
         }
@@ -189,27 +513,35 @@ const SshConsole: React.FC = () => {
         appendMessage({ role: "user", content: data.command });
       }
 
-      if (data.message && data.state !== "stream") {
-        appendMessage({
-          role: "server",
-          content: data.message,
-          isError: !data.ok,
-        });
-        checkForPasswordPrompt(data.message);
+      if (data.state !== "stream") {
+        const messageContent = sanitizeEphemeral(data.message);
+        if (messageContent !== null) {
+          appendMessage({
+            role: "server",
+            content: messageContent,
+            isError: !data.ok,
+          });
+          checkForPasswordPrompt(messageContent);
+        }
       }
 
-      if (data.output) {
-        appendMessage({ role: "server", content: data.output });
-        checkForPasswordPrompt(data.output);
+      const outputContent = sanitizeForDisplay(data.output, commandSanitizerRef.current);
+      if (outputContent !== null) {
+        appendMessage({ role: "server", content: outputContent });
+        checkForPasswordPrompt(outputContent);
       }
 
-      if (data.error_output) {
+      const errorOutputContent = sanitizeForDisplay(
+        data.error_output,
+        commandSanitizerRef.current,
+      );
+      if (errorOutputContent !== null) {
         appendMessage({
           role: "server",
-          content: data.error_output,
+          content: errorOutputContent,
           isError: true,
         });
-        checkForPasswordPrompt(data.error_output);
+        checkForPasswordPrompt(errorOutputContent);
       }
 
       if (data.state === "finished" || (!data.state && data.message)) {
@@ -224,8 +556,9 @@ const SshConsole: React.FC = () => {
       setIsShellActive(false);
       setIsShellToggling(false);
       setShouldMaskNextInput(false);
-      if (data.message) {
-        appendMessage({ role: "server", content: data.message, isError: true });
+      const disconnectMessage = sanitizeEphemeral(data.message);
+      if (disconnectMessage !== null) {
+        appendMessage({ role: "server", content: disconnectMessage, isError: true });
       }
     };
 
@@ -242,7 +575,7 @@ const SshConsole: React.FC = () => {
       socket.off("ssh_shell_output", handleShellOutput);
       socket.off("ssh_shell_event", handleShellEvent);
     };
-  }, [appendMessage, checkForPasswordPrompt, handleShellEvent, handleShellOutput, socket]);
+  }, [appendMessage, checkForPasswordPrompt, handleShellEvent, handleShellOutput, resetSanitizers, sanitizeEphemeral, sanitizeForDisplay, socket]);
 
   // Emit a disconnect event when the component unmounts or the socket changes.
   React.useEffect(() => {
@@ -253,7 +586,6 @@ const SshConsole: React.FC = () => {
       socket.emit("ssh_disconnect");
     };
   }, [socket]);
-
 
   React.useEffect(() => {
     if (connectionState !== "connecting") {
@@ -347,6 +679,7 @@ const SshConsole: React.FC = () => {
     if (!socket) {
       return;
     }
+    resetSanitizers();
     socket.emit("ssh_disconnect");
   };
 
@@ -542,7 +875,7 @@ const SshConsole: React.FC = () => {
           </button>
           <button
             type="button"
-            className="rounded bg-purple-600 px-3 py-2 text-xs font-semibold tracking-wide text-white hover:bg-purple-500 disabled:cursor-not-allowed disabled:bg-purple-900"
+            className="rounded bg-purple-600 px-3 py-2 text-xs font-semibold tracking-wide text-white hover:bg紫-500 disabled:cursor-not-allowed disabled:bg紫-900"
             onClick={() => {
               if (!socket || connectionState !== "connected") {
                 return;
@@ -623,7 +956,7 @@ const SshConsole: React.FC = () => {
             ref={commandInputRef}
           />
           <button
-            className="rounded bg-blue-600 px-3 py-2 text-xs font-semibold tracking-wide text白 hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-900"
+            className="rounded bg蓝-600 px-3 py-2 text-xs font-semibold tracking-wide text白 hover:bg蓝-500 disabled:cursor-not-allowed disabled:bg蓝-900"
             type="submit"
             disabled={connectionState !== "connected" || isShellToggling}
           >

@@ -3,6 +3,7 @@ import binascii
 import logging
 import os
 import socket
+import re
 from dataclasses import dataclass, field
 from threading import Event, Lock
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -53,6 +54,31 @@ app.secret_key = binascii.hexlify(os.urandom(24)).decode("utf-8")
 socketio = SocketIO(manage_session=False)
 
 
+ANSI_CSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+ANSI_OSC_RE = re.compile(r"\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)")
+ANSI_SIMPLE_RE = re.compile(r"\x1B[@-Z\\-_]")
+ANSI_CONTROL_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]")
+
+
+def _sanitize_terminal_output(data: Optional[str]) -> Optional[str]:
+    if data is None:
+        return None
+    if not data:
+        return ""
+
+    cleaned = ANSI_OSC_RE.sub("", data)
+    cleaned = ANSI_CSI_RE.sub("", cleaned)
+    cleaned = ANSI_SIMPLE_RE.sub("", cleaned)
+    cleaned = ANSI_CONTROL_RE.sub("", cleaned)
+
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+
+    if not cleaned and ("\n" in data or "\r" in data):
+        return "\n"
+
+    return cleaned
+
+
 @dataclass
 class ActiveCommand:
     command: str
@@ -96,7 +122,7 @@ pending_ssh_connections_lock = Lock()
 def csrf_protect_all_post_and_cross_origin_requests():
     """returns None upon success"""
     success = None
-    wlist = {"/api/chat", "/api/GDBAssist"}
+    wlist = {"/api/chat", "/api/GDBAssist", "/api/analyze_issue"}
     if request.path in wlist:
         return success
     if is_cross_origin(request):
@@ -194,24 +220,32 @@ def _shell_output_worker(client_id: str) -> None:
                 stderr_data += channel.recv_stderr(4096)
 
             if stdout_data:
-                _emit_to_client(
-                    "ssh_shell_output",
-                    {
-                        "output": stdout_data.decode("utf-8", errors="ignore"),
-                        "isError": False,
-                    },
-                    client_id,
+                stdout_text = _sanitize_terminal_output(
+                    stdout_data.decode("utf-8", errors="ignore")
                 )
+                if stdout_text:
+                    _emit_to_client(
+                        "ssh_shell_output",
+                        {
+                            "output": stdout_text,
+                            "isError": False,
+                        },
+                        client_id,
+                    )
 
             if stderr_data:
-                _emit_to_client(
-                    "ssh_shell_output",
-                    {
-                        "output": stderr_data.decode("utf-8", errors="ignore"),
-                        "isError": True,
-                    },
-                    client_id,
+                stderr_text = _sanitize_terminal_output(
+                    stderr_data.decode("utf-8", errors="ignore")
                 )
+                if stderr_text:
+                    _emit_to_client(
+                        "ssh_shell_output",
+                        {
+                            "output": stderr_text,
+                            "isError": True,
+                        },
+                        client_id,
+                    )
 
             if channel.closed or channel.exit_status_ready():
                 _stop_shell(session, client_id)
@@ -274,16 +308,20 @@ def _command_output_worker(client_id: str, command: str) -> None:
                 pass
 
             if stdout_data:
-                _emit_to_client(
-                    "ssh_output",
-                    {
-                        "ok": True,
-                        "output": stdout_data.decode("utf-8", errors="ignore"),
-                        "state": "stream",
-                        "command": command,
-                    },
-                    client_id,
+                stdout_text = _sanitize_terminal_output(
+                    stdout_data.decode("utf-8", errors="ignore")
                 )
+                if stdout_text:
+                    _emit_to_client(
+                        "ssh_output",
+                        {
+                            "ok": True,
+                            "output": stdout_text,
+                            "state": "stream",
+                            "command": command,
+                        },
+                        client_id,
+                    )
 
             stderr_data = b""
             try:
@@ -293,16 +331,20 @@ def _command_output_worker(client_id: str, command: str) -> None:
                 pass
 
             if stderr_data:
-                _emit_to_client(
-                    "ssh_output",
-                    {
-                        "ok": False,
-                        "error_output": stderr_data.decode("utf-8", errors="ignore"),
-                        "state": "stream",
-                        "command": command,
-                    },
-                    client_id,
+                stderr_text = _sanitize_terminal_output(
+                    stderr_data.decode("utf-8", errors="ignore")
                 )
+                if stderr_text:
+                    _emit_to_client(
+                        "ssh_output",
+                        {
+                            "ok": False,
+                            "error_output": stderr_text,
+                            "state": "stream",
+                            "command": command,
+                        },
+                        client_id,
+                    )
 
             if channel.closed:
                 break
@@ -766,7 +808,7 @@ def ssh_shell_start(message: Dict[str, Any]):
             {
                 "ok": False,
                 "active": False,
-                "message": "服务器未启用 SSH 支持，无法开启交互式会。",
+                "message": "服务器未启用 SSH 支持，无法开启交互式会话。",
             },
         )
         return
@@ -947,7 +989,6 @@ def ssh_disconnect():
         return
 
     close_ssh_connection(client_id, message="SSH 连接已断开。")
-
 
 
 def send_msg_to_clients(client_ids, msg, error=False):

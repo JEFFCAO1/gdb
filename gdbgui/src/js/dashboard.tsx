@@ -15,7 +15,8 @@ type AnalysisResult = {
   summary: string;
   details: string;
   recommendations: string[];
-  suggestedGdbCommand?: string;
+  suggestedDebugCommand?: string;
+  conversation_id?: string;
 };
 
 type UploadedFile = {
@@ -45,7 +46,7 @@ function GdbguiSession(props: { session: GdbguiSession; updateData: Function }) 
   const params = new URLSearchParams({
     gdbpid: session.pid.toString()
   }).toString();
-  const url = `${window.location.origin}/?${params}`;
+  const url = `${window.location.origin}/tools?${params}`;
   const [shareButtonText, setShareButtonText] = useState(copyIcon);
   const [clickedKill, setClickedKill] = useState(false);
   let timeout: NodeJS.Timeout;
@@ -130,7 +131,7 @@ class StartCommand extends React.Component<any, { value: string }> {
     const params = new URLSearchParams({
       gdb_command: this.state.value
     }).toString();
-    redirect(`/?${params}`);
+    redirect(`/tools?${params}`);
   }
 
   render() {
@@ -272,12 +273,14 @@ function AnalysisResults({ result }: { result: AnalysisResult }) {
   };
 
   const startDebugging = () => {
-    if (result.suggestedGdbCommand) {
-      const params = new URLSearchParams({
-        gdb_command: result.suggestedGdbCommand
-      }).toString();
-      window.open(`/?${params}`, '_blank');
+    // Persist condensed analysis summary for later chat context instead of unused conversation_id
+    try {
+      const analysisString = `IssueType=${result.issueType}; Severity=${result.severity}; Summary=${result.summary}\nDetails:\n${result.details}`;
+      localStorage.setItem('gdbgui_analysis', analysisString);
+    } catch (e) {
+      console.warn('Failed to persist analysis to localStorage', e);
     }
+    window.open(`/tools`, '_blank');
   };
 
   return (
@@ -315,12 +318,12 @@ function AnalysisResults({ result }: { result: AnalysisResult }) {
         </ul>
       </div>
 
-      {result.suggestedGdbCommand && (
+      {result.suggestedDebugCommand && (
         <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded">
           <div>
-            <p className="text-sm text-blue-800 font-medium">Suggested GDB Command:</p>
+            <p className="text-sm text-blue-800 font-medium">Suggested Debug Command:</p>
             <code className="text-blue-900 bg-blue-100 px-2 py-1 rounded text-sm">
-              {result.suggestedGdbCommand}
+              {result.suggestedDebugCommand}
             </code>
           </div>
           <button
@@ -376,6 +379,15 @@ function IssueAnalysisTab() {
       }
 
       const result = await response.json();
+      
+      // Persist analysis summary for later chat sessions
+      try {
+        const analysisString = `IssueType=${result.issueType}; Severity=${result.severity}; Summary=${result.summary}\nDetails:\n${result.details}`;
+        localStorage.setItem('gdbgui_analysis', analysisString);
+      } catch (e) {
+        console.warn('Failed saving analysis', e);
+      }
+      
       setAnalysisResult(result);
     } catch (error) {
       console.error('Analysis failed:', error);
@@ -489,7 +501,7 @@ Common causes:
                   'Add null pointer checks before dereferencing',
                   'Use static analysis tools like Clang Static Analyzer'
                 ],
-                suggestedGdbCommand: 'gdb ./program -ex "run" -ex "bt" -ex "info registers"'
+                suggestedDebugCommand: 'gdb ./program -ex "run" -ex "bt" -ex "info registers"'
               });
             }}
             className="px-6 py-3 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"

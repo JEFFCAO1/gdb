@@ -70,6 +70,7 @@ def chatbox_api():
     data = request.get_json(force=True)
     # Accepts: { 
     #   query: str,  # actual user input
+    #   client_id?: str,  # WebSocket client ID to identify debug session
     #   inputs: {     # structured debug context
     #     CurCode?: str,
     #     ProcessInfo?: str, 
@@ -80,11 +81,12 @@ def chatbox_api():
     #   }
     # }
     user_query = data.get("query")
+    client_id = data.get("client_id")
     debug_inputs = data.get("inputs", {})
     
     user = "Dev"  # or get from session/user context
     api_url = "http://172.31.150.200/v1/chat-messages"
-    api_key = "app-mP555H3nbfKmJ1w5BamG93bf"
+    api_key = "app-vDBvWjyDmonGxnsLoPirXHoN"
     
     if not user_query:
         return jsonify({"reply": "No query provided."}), 400
@@ -92,7 +94,7 @@ def chatbox_api():
     query = user_query
     
     # Build structured inputs with debug context
-    inputs = {}
+    inputs = {"Coredump": 0}
     
     # Add structured debug context fields
     if debug_inputs.get("CurCode"):
@@ -110,6 +112,9 @@ def chatbox_api():
     if debug_inputs.get("GDBLog"):
         inputs["GDBLog"] = debug_inputs["GDBLog"]
     
+    if debug_inputs.get("Analysis"):
+        inputs["Analysis"] = debug_inputs["Analysis"]
+
     payload = {
         "inputs": inputs,
         "query": query,
@@ -122,10 +127,12 @@ def chatbox_api():
         "User-Agent": "gdbgui/ai-chatbox"
     }
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
         data = response.json()
-        return jsonify({"reply": data.get("answer", "No response from API")})
+        return jsonify({
+            "reply": data.get("answer", "No response from API"),
+        })
     except requests.exceptions.RequestException as e:
         logger.error(f"Chat API error: {e}")
         return jsonify({"reply": f"Chat service error: {str(e)}"}), 500
@@ -136,53 +143,51 @@ def chatbox_api():
 # Issue Analysis API
 @blueprint.route("/api/analyze_issue", methods=["POST"])
 def analyze_issue_api():
-    """Analyze uploaded error logs, core files, and source code to provide preliminary issue assessment"""
+    """Analyze uploaded error logs, core files, and source code to provide preliminary issue assessment
+    
+    Accepts:
+    {
+        errorLog?: str,
+        coreFile?: str,
+        sourceDirectory?: str,
+        additionalInfo?: str,
+        hasErrorLog?: bool,
+        hasCoreFile?: bool,
+        hasSourceDirectory?: bool,
+        hasAdditionalInfo?: bool,
+        client_id?: str  # WebSocket client ID to identify debug session
+    }
+    """
     data = request.get_json(force=True)
     
     error_log = data.get("errorLog", "")
     core_file = data.get("coreFile", "")
     source_directory = data.get("sourceDirectory", "")
+    additionalInfo = data.get("additionalInfo", "")
     has_error_log = data.get("hasErrorLog", False)
     has_core_file = data.get("hasCoreFile", False)
     has_source_directory = data.get("hasSourceDirectory", False)
+    has_additional_info = data.get("hasAdditionalInfo", False)
+    client_id = data.get("client_id")  # WebSocket client ID to identify debug session
     
-    # Build analysis prompt for AI
-    analysis_prompt = "Analyze the following debugging information and provide a structured assessment:\n\n"
+    inputs = {"Coredump": 0}
     
     if has_error_log and error_log:
-        analysis_prompt += f"ERROR LOG:\n{error_log}\n\n"
+        inputs["ErrorLog"] = error_log
     
-    if has_core_file and core_file:
-        analysis_prompt += f"CORE DUMP FILE: {core_file}\n\n"
-        
-    if has_source_directory and source_directory:
-        analysis_prompt += f"SOURCE CODE DIRECTORY: {source_directory}\n\n"
-    
-    analysis_prompt += """Please analyze this information and provide:
-1. Issue Type: What kind of problem this appears to be (segmentation fault, memory leak, logic error, etc.)
-2. Severity: Rate as low/medium/high/critical
-3. Summary: Brief description of the issue
-4. Details: Technical analysis of the problem
-5. Recommendations: List of specific debugging steps or fixes
-6. Suggested GDB Command: A specific gdb command to start debugging this issue
-
-Format your response as a JSON object with these fields: issueType, severity, summary, details, recommendations (array), suggestedGdbCommand"""
-
     # Call AI API for analysis
     api_url = "http://172.31.150.200/v1/chat-messages"
-    api_key = "app-mP555H3nbfKmJ1w5BamG93bf"
+    api_key = "app-vDBvWjyDmonGxnsLoPirXHoN"
     
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
     payload = {
-        "inputs": {},
-        "query": analysis_prompt,
+        "inputs": inputs,
+        "query": additionalInfo,
         "response_mode": "blocking",
-        "conversation_id": "",
-        "user": "IssueAnalyzer"
+        "user": "Dev"
     }
     
     try:
@@ -230,7 +235,6 @@ Format your response as a JSON object with these fields: issueType, severity, su
         analysis_result.setdefault("details", "See AI analysis for details")
         analysis_result.setdefault("recommendations", ["Start debugging with GDB"])
         analysis_result.setdefault("suggestedGdbCommand", "gdb ./your_program")
-        
         return jsonify(analysis_result)
         
     except requests.exceptions.RequestException as e:
@@ -357,6 +361,27 @@ def help_route():
 
 @blueprint.route("/", methods=["GET"])
 @authenticate
+def dashboard():
+    """Dashboard page for issue analysis and session management"""
+    add_csrf_token_to_session()
+    
+    manager = current_app.config.get("_manager")
+    sessions = manager.get_dashboard_data() if manager else []
+    
+    # Get default GDB command from config
+    default_command = current_app.config.get("gdb_command", "gdb")
+    
+    return render_template(
+        "dashboard.html",
+        version=__version__,
+        debug=current_app.debug,
+        gdbgui_sessions=sessions,
+        csrf_token=session.get("csrf_token"),
+        default_command=default_command
+    )
+
+@blueprint.route("/tools", methods=["GET"])
+@authenticate
 def tools():
     add_csrf_token_to_session()
     return render_template("toolstabs.html")
@@ -394,24 +419,9 @@ def gdbgui():
 
 @blueprint.route("/dashboard", methods=["GET"])
 @authenticate
-def dashboard():
-    """Dashboard page for issue analysis and session management"""
-    add_csrf_token_to_session()
-    
-    manager = current_app.config.get("_manager")
-    sessions = manager.get_dashboard_data() if manager else []
-    
-    # Get default GDB command from config
-    default_command = current_app.config.get("gdb_command", "gdb")
-    
-    return render_template(
-        "dashboard.html",
-        version=__version__,
-        debug=current_app.debug,
-        gdbgui_sessions=sessions,
-        csrf_token=session.get("csrf_token"),
-        default_command=default_command
-    )
+def dashboard_alt():
+    """Alternative dashboard route - redirects to root"""
+    return redirect("/")
 
 
 @blueprint.route("/dashboard_data", methods=["GET"])
