@@ -34,6 +34,16 @@ class DebugSession:
         self.pid = pid
         self.start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.client_ids: Set[str] = set()
+        # When the last client disconnects we don't immediately kill the session.
+        # We record the time it became empty so a grace period can elapse allowing
+        # transient websocket disconnects (e.g. long running HTTP requests, network hiccups)
+        # without destroying the underlying gdb process.
+        # type: Optional[datetime.datetime]
+        self.last_empty_at = None
+        # conversation_id is used by AI assistant APIs to maintain chat continuity.
+        # It is generated externally (left blank on first request) and then persisted
+        # here so subsequent /api/chat calls for this debug session can include it.
+        self.conversation_id: Optional[str] = None
 
     def terminate(self):
         if self.pid:
@@ -51,7 +61,18 @@ class DebugSession:
             "command": self.command,
             "c2": "hi",
             "client_ids": list(self.client_ids),
+            "conversation_id": self.conversation_id,
         }
+
+    def set_conversation_id(self, conversation_id: Optional[str]):
+        """Persist the first non-empty conversation id for this session.
+
+        Subsequent attempts to set a different conversation_id are ignored so
+        the original conversation context is preserved for the lifetime of
+        the debug session.
+        """
+        if conversation_id and self.conversation_id is None:
+            self.conversation_id = conversation_id
 
     def add_client(self, client_id: str):
         self.client_ids.add(client_id)
@@ -59,7 +80,19 @@ class DebugSession:
     def remove_client(self, client_id: str):
         self.client_ids.discard(client_id)
         if len(self.client_ids) == 0:
-            self.terminate()
+            # Mark time of becoming empty. Actual termination deferred to
+            # SessionManager.remove_debug_sessions_with_no_clients based on grace period.
+            self.last_empty_at = datetime.datetime.now()
+
+    def has_expired(self, grace_seconds: int) -> bool:
+        """Return True if there are no clients and grace period has elapsed."""
+        if self.client_ids:
+            return False
+        if self.last_empty_at is None:
+            # Should not happen, but be defensive.
+            return True
+        delta = datetime.datetime.now() - self.last_empty_at
+        return delta.total_seconds() >= grace_seconds
 
 
 class SessionManager(object):
@@ -134,11 +167,23 @@ class SessionManager(object):
         return orphaned_client_ids
 
     def remove_debug_sessions_with_no_clients(self) -> None:
+        # Default grace period can be overridden by app config (set externally)
+        # Accessing via environment variable keeps this module decoupled from Flask app.
+        try:
+            grace_seconds = int(os.environ.get("GDBG_SESSION_GRACE_SECONDS", "300"))
+        except ValueError:
+            grace_seconds = 300
+
         to_remove = []
         for debug_session, _ in self.debug_session_to_client_ids.items():
-            if len(debug_session.client_ids) == 0:
+            if debug_session.has_expired(grace_seconds):
                 to_remove.append(debug_session)
         for debug_session in to_remove:
+            logger.info(
+                "Removing debug session %s after %ss grace period with no clients",
+                debug_session.pid,
+                grace_seconds,
+            )
             self.remove_debug_session(debug_session)
 
     def get_pid_from_debug_session(self, debug_session: DebugSession) -> Optional[int]:

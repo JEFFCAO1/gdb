@@ -88,9 +88,9 @@ export class Terminals extends React.Component {
 
     // Collect terminal contents as structured data
     const terminalContents = {
-      gdbOutput: grab(this.userPty),
+      gdbOutput: grab(this.gdbguiPty),
       programOutput: grab(this.programPty),
-      gdbLog: grab(this.gdbguiPty)
+      gdbLog: grab(this.userPty)
     };
 
     // Collect source code contents if available

@@ -478,6 +478,7 @@ function IssueAnalysisTab() {
         </div>
 
         <div className="flex justify-center space-x-4">
+        {/*
           <button
             onClick={() => {
               // Demo functionality - simulate a segfault analysis
@@ -508,7 +509,7 @@ Common causes:
           >
             Try Demo
           </button>
-          
+          */}
           <button
             onClick={handleAnalyze}
             disabled={analyzing || (!errorLog && !coreFile && !sourceDirectory && !additionalInfo)}

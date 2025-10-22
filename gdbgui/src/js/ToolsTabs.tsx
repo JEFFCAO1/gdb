@@ -189,16 +189,79 @@ function ChatSidebar({
       };
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify(payload)
       });
-      if (!res.ok) throw new Error("API error: " + res.status);
-      const data = await res.json();
-      
-      setMessages((msgs) => [
-        ...msgs,
-        { sender: "ai", text: data.reply || "[No reply]" },
-      ]);
+      if (!res.ok || !res.body) throw new Error("API error: " + res.status);
+
+      // Prepare a provisional AI message appended immediately after user message.
+      let aiText = "";
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      // Insert placeholder AI message (always last during this request)
+      setMessages((msgs) => [...msgs, { sender: "ai", text: "" }]);
+
+      const flushUpdate = () => {
+        setMessages((msgs) => {
+          if (!msgs.length) return msgs;
+          const copy = [...msgs];
+          const idx = copy.length - 1; // last should be our streaming AI message
+          if (copy[idx].sender === "ai") {
+            copy[idx] = { ...copy[idx], text: aiText || "" };
+          }
+          return copy;
+        });
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+          const rawChunk = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const chunk = rawChunk.replace(/\r/g, "").trim();
+          if (!chunk) continue;
+          // Parse SSE: allow multiple 'data:' lines (concatenate) and ignore comments
+          let eventName = "message";
+          const dataLines: string[] = [];
+          for (const line of chunk.split(/\n/)) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue; // comment
+            if (line.startsWith("event:")) {
+              eventName = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+              dataLines.push(line.slice(5));
+            }
+          }
+          if (!dataLines.length) continue;
+          const dataPayload = dataLines.join("\n").trim();
+          // Only attempt JSON parse if it looks like JSON
+          if (!dataPayload.startsWith("{") || !dataPayload.endsWith("}")) {
+            // Non-JSON data not expected; skip
+            continue;
+          }
+          try {
+            const obj = JSON.parse(dataPayload);
+            if (eventName === "message" && obj.fragment) {
+              aiText += obj.fragment;
+              flushUpdate();
+            } else if (eventName === "done" && obj.answer) {
+              aiText = obj.answer;
+              flushUpdate();
+            } else if (eventName === "error" && obj.error) {
+              aiText += `\n[Error: ${obj.error}]`;
+              flushUpdate();
+            }
+          } catch (e) {
+            aiText += "\n[Malformed event data]";
+            flushUpdate();
+          }
+        }
+      }
     } catch (e: any) {
       setError(e?.message || "Unknown error");
       setMessages((msgs) => [...msgs, { sender: "ai", text: "Sorry, I couldn't process your request." }]);

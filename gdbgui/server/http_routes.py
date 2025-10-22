@@ -83,62 +83,149 @@ def chatbox_api():
     user_query = data.get("query")
     client_id = data.get("client_id")
     debug_inputs = data.get("inputs", {})
-    
+    conversation_id = data.get("conversation_id")  # may be empty to start new
     user = "Dev"  # or get from session/user context
     api_url = "http://172.31.150.200/v1/chat-messages"
     api_key = "app-vDBvWjyDmonGxnsLoPirXHoN"
-    
+
+    manager = current_app.config.get("_manager")
+    debug_session = manager.debug_session_from_client_id(client_id) if (manager and client_id) else None
+    # If caller passed a conversation_id and it matches stored one, we ignore any new
+    # inputs besides the query per spec. If no stored id and caller omitted/empty id,
+    # upstream will create one and we persist it from streaming events.
+    reuse_existing_inputs = False
+    if debug_session and debug_session.conversation_id and conversation_id == debug_session.conversation_id:
+        reuse_existing_inputs = True
+
     if not user_query:
-        return jsonify({"reply": "No query provided."}), 400
-    
-    query = user_query
-    
-    # Build structured inputs with debug context
+        return jsonify({"error": "No query provided."}), 400
+
+    # Build structured inputs
     inputs = {"Coredump": 0}
-    
-    # Add structured debug context fields
-    if debug_inputs.get("CurCode"):
-        inputs["CurCode"] = debug_inputs["CurCode"]
-    
-    if debug_inputs.get("ProcessInfo"):
-        inputs["ProcessInfo"] = debug_inputs["ProcessInfo"]
-        
-    if debug_inputs.get("ProgramOutput"):
-        inputs["ProgramOutput"] = debug_inputs["ProgramOutput"]
-
-    if debug_inputs.get("GDBOutput"):
-        inputs["GDBOutput"] = debug_inputs["GDBOutput"]
-
-    if debug_inputs.get("GDBLog"):
-        inputs["GDBLog"] = debug_inputs["GDBLog"]
-    
-    if debug_inputs.get("Analysis"):
-        inputs["Analysis"] = debug_inputs["Analysis"]
+    if not reuse_existing_inputs:
+        for key in [
+            "CurCode",
+            "ProcessInfo",
+            "ProgramOutput",
+            "GDBOutput",
+            "GDBLog",
+            "Analysis",
+        ]:
+            val = debug_inputs.get(key)
+            if val:
+                inputs[key] = val
+    else:
+        # conversation_id already established: instead of sending structured inputs again,
+        # fold any provided debug_inputs into the natural language query to give model
+        # refreshed context without resetting conversation state.
+        formatted_sections = []
+        if debug_inputs.get("GDBLog"):
+            formatted_sections.append(f"GDBLog:\n{debug_inputs['GDBLog']}")
+        formatted_input_text = "\n\n".join(formatted_sections)
 
     payload = {
         "inputs": inputs,
-        "query": query,
-        "response_mode": "blocking",
-        "user": user
+        "query": user_query,
+        "response_mode": "streaming",  # switched mode
+        "user": user,
     }
+    if reuse_existing_inputs and formatted_input_text:
+        # Combine formatted inputs with original user query. Tag user query for clarity.
+        combined_query = f"{formatted_input_text}\n\nUserQuery:\n{user_query}"
+        payload["query"] = combined_query
+    # Only include conversation_id if we already have one stored; if empty string or None we omit to let upstream create.
+    if debug_session and debug_session.conversation_id:
+        payload["conversation_id"] = debug_session.conversation_id
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "User-Agent": "gdbgui/ai-chatbox"
+        "Accept": "text/event-stream",
+        "User-Agent": "gdbgui/ai-chatbox",
     }
-    try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        return jsonify({
-            "reply": data.get("answer", "No response from API"),
-        })
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Chat API error: {e}")
-        return jsonify({"reply": f"Chat service error: {str(e)}"}), 500
-    except Exception as e:
-        logger.error(f"Chat error: {e}")
-        return jsonify({"reply": f"Internal error: {str(e)}"}), 500
+
+    def generate():  # type: ignore
+        """Generator yielding SSE to client while aggregating answer."""
+        accumulated = []
+        try:
+            with requests.post(
+                api_url,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=300,
+            ) as r:
+                r.raise_for_status()
+                for raw_line in r.iter_lines(decode_unicode=True):
+                    if raw_line is None:
+                        continue
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    json_part = line[5:].strip()
+                    try:
+                        event_obj = json.loads(json_part)
+                    except Exception:
+                        # Forward raw line for debugging
+                        yield f"event: debug\ndata: {json.dumps({'raw': line})}\n\n"
+                        continue
+
+                    event_type = event_obj.get("event") or event_obj.get("type") or "message"
+                    answer_fragment = event_obj.get("answer") or ""
+                    if answer_fragment:
+                        accumulated.append(answer_fragment)
+
+                    # Forward the fragment to the client immediately
+                    upstream_conversation_id = event_obj.get("conversation_id")
+                    if debug_session and upstream_conversation_id and not debug_session.conversation_id:
+                        # Persist newly created conversation id.
+                        logger.error("Persist newly created conversation id.")
+                        debug_session.set_conversation_id(upstream_conversation_id)
+
+                    yield (
+                        "event: "
+                        + event_type
+                        + "\n"
+                        + "data: "
+                        + json.dumps(
+                            {
+                                "fragment": answer_fragment,
+                                "conversation_id": upstream_conversation_id,
+                                "message_id": event_obj.get("message_id"),
+                            }
+                        )
+                        + "\n\n"
+                    )
+
+                # Completed stream -> send final aggregated answer
+                final_answer = "".join(accumulated).strip() or "No response from API"
+                yield (
+                    "event: done\n"
+                    + "data: "
+                    + json.dumps({"answer": final_answer})
+                    + "\n\n"
+                )
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Chat streaming error: {e}")
+            logger.error(payload)
+            yield (
+                "event: error\n"
+                + "data: "
+                + json.dumps({"error": f"Chat service error: {str(e)}"})
+                + "\n\n"
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error(f"Chat unexpected error: {e}")
+            yield (
+                "event: error\n"
+                + "data: "
+                + json.dumps({"error": f"Internal error: {str(e)}"})
+                + "\n\n"
+            )
+
+    return Response(generate(), mimetype="text/event-stream")
 
 # Issue Analysis API
 @blueprint.route("/api/analyze_issue", methods=["POST"])
