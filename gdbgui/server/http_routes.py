@@ -99,7 +99,6 @@ def chatbox_api():
 
     if not user_query:
         return jsonify({"error": "No query provided."}), 400
-
     # Build structured inputs
     inputs = {"Coredump": 0}
     if not reuse_existing_inputs:
@@ -110,6 +109,7 @@ def chatbox_api():
             "GDBOutput",
             "GDBLog",
             "Analysis",
+            "ValgrindLog"
         ]:
             val = debug_inputs.get(key)
             if val:
@@ -121,6 +121,8 @@ def chatbox_api():
         formatted_sections = []
         if debug_inputs.get("GDBLog"):
             formatted_sections.append(f"GDBLog:\n{debug_inputs['GDBLog']}")
+        if debug_inputs.get("ValgrindLog"):
+            formatted_sections.append(f"ValgrindLog:\n{debug_inputs['ValgrindLog']}")
         formatted_input_text = "\n\n".join(formatted_sections)
 
     payload = {
@@ -209,7 +211,6 @@ def chatbox_api():
                 )
         except requests.exceptions.RequestException as e:
             logger.error(f"Chat streaming error: {e}")
-            logger.error(payload)
             yield (
                 "event: error\n"
                 + "data: "

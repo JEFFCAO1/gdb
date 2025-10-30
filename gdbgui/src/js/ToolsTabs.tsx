@@ -6,17 +6,27 @@ import SshConsole from "./SshConsole";
 import GdbApi from "./GdbApi";
 import SplitPane from "react-split-pane";
 
+function removeSuffix(s: string | null, suffix: string): string  {
+    if(!s) return "";
+    return s.endsWith(suffix) ? s.slice(0, s.length - suffix.length) : s;
+}
+
 function ChatSidebar({
   onCollectPty,
   injectedMessage,
   className,
   getCollectedData,
-
+  showStraceOption = false,
+  showValgrindOption = false,
+  getLastSshOutput,
 }: {
   onCollectPty: () => void;
   injectedMessage?: string | null;
   className?: string | "w-80";
   getCollectedData?: () => Promise<string | null>;
+  showStraceOption?: boolean;
+  showValgrindOption?: boolean;
+  getLastSshOutput?: () => string | null;
 }) {
   const [messages, setMessages] = React.useState([
     { sender: "ai", text: "Hi! I'm your AI assistant. How can I help you today?" },
@@ -26,6 +36,7 @@ function ChatSidebar({
   const [error, setError] = React.useState("");
   const [autoCollect, setAutoCollect] = React.useState(false);
   const [straceChecked, setStraceChecked] = React.useState(false);
+  const [valgrind, setVargrind] = React.useState(false);
   const [waitingForCollection, setWaitingForCollection] = React.useState(false);
   const [conversationId, setConversationId] = React.useState<string | null>(null);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
@@ -131,7 +142,7 @@ function ChatSidebar({
     setLoading(true);
 
     // Auto-collect context if checkbox is enabled
-    let structuredDebugContext = null;
+    let structuredDebugContext: { [key: string]: string } = {};
     if (autoCollect) {
       try {
         // Create a promise to wait for collection
@@ -171,7 +182,12 @@ function ChatSidebar({
         }
       }
     }
-
+    if(valgrind){
+        // Attach last SSH output as ValgrindLog (if available)
+        const lastOutput = getLastSshOutput ? getLastSshOutput() : null;
+        structuredDebugContext["ValgrindLog"] = removeSuffix(lastOutput, "命令已完成。");
+        console.debug("[ChatSidebar] Added valgrind log to debug context:", structuredDebugContext);
+    }
     try {
       const inputs: { [key: string]: string } = structuredDebugContext || {};
       // Inject persisted analysis if available
@@ -186,6 +202,8 @@ function ChatSidebar({
       const payload = {
         query: input,
         inputs,
+        // Prefer store-provided client_id if available, else try window global set by GdbApi
+        client_id: localStorage.getItem("client_id") || undefined,
       };
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -332,11 +350,20 @@ function ChatSidebar({
           />
           strace
         </label>
+        <label className="flex items-center gap-2 text-xs text-gray-600">
+          <input
+            type="checkbox"
+            checked={valgrind}
+            onChange={(e) => setVargrind(e.target.checked)}
+            className="rounded"
+          />
+          valgrind
+        </label>
       </div>
       <div className="p-2 border-t flex gap-2">
         <input
           className="w-full border rounded p-1"
-          placeholder={loading ? "Waiting for response..." : "Type a message..."}
+          placeholder={loading ? "Waiting for response..." : "Type a message...(What's the next GDB command?)"}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -370,6 +397,7 @@ const GdbPanel = React.forwardRef<HTMLIFrameElement, { visible: boolean }>(({ vi
 export default function ToolsTabs() {
   const [active, setActive] = useState("gdb");
   const gdbIframeRef = React.useRef<HTMLIFrameElement>(null);
+  const sshConsoleRef = React.useRef<any>(null);
   const [gdbReady, setGdbReady] = React.useState(false);
   const [ptyMessage, setPtyMessage] = React.useState<string | null>(null);
 
@@ -525,12 +553,13 @@ export default function ToolsTabs() {
   }, []);
 
   const isStrace = active === "strace";
+  const isValgrind = active === "valgrind";
   const tabs = [
     { label: "GDB", id: "gdb" },
     { label: "strace", id: "strace" },
     { label: "valgrind", id: "valgrind" },
-    { label: "top", id: "top" },
-    { label: "perfetto", id: "perfetto" },
+    // { label: "top", id: "top" },
+    // { label: "perfetto", id: "perfetto" },
   ];
 
   const StracePanel = ({ visible }: { visible: boolean }) => {
@@ -555,7 +584,9 @@ export default function ToolsTabs() {
     );
   };
 
+  {/*
   const TopPanel = ({ visible }: { visible: boolean }) => (visible ? <div className="p-4">top tool content here</div> : null);
+  */}
 
   const handleCollectPty = () => {
     if (!gdbReady) {
@@ -576,6 +607,7 @@ export default function ToolsTabs() {
 
   // Render helper for the perfetto panel. It uses an iframe to embed the
   // external Perfetto UI.
+  {/*
   const PerfettoPanel = ({ visible }: { visible: boolean }) => (
     <div className={visible ? "w-full h-full flex flex-col flex-1 min-h-0" : "hidden"}>
       <iframe
@@ -586,6 +618,7 @@ export default function ToolsTabs() {
       />
     </div>
   );
+  */}
 
   return (
     <SplitPane
@@ -636,9 +669,12 @@ export default function ToolsTabs() {
         <div className="flex-1 min-h-0 bg-gray-50 overflow-hidden relative">
           <GdbPanel ref={gdbIframeRef} visible={active === "gdb"} />
           <StracePanel visible={active === "strace"} />
+          <div className={active === "valgrind" ? "flex h-full w-full min-h-0" : "hidden"}>
+            <SshConsole ref={sshConsoleRef} />
+          </div>
           <ValgrindPanel visible={active === "valgrind"} />
-          <TopPanel visible={active === "top"} />
-          <PerfettoPanel visible={active === "perfetto"} />
+          {/*<TopPanel visible={active === "top"} />*/}
+          {/*<PerfettoPanel visible={active === "perfetto"} />*/}
         </div>
       </div>
       {/* 右侧 AI Chat */}
@@ -647,11 +683,10 @@ export default function ToolsTabs() {
         injectedMessage={ptyMessage}
         className={isStrace ? "flex-1 min-w-0" : "min-w-0"}
         getCollectedData={getCollectedData}
+        showStraceOption={isStrace}
+        showValgrindOption={isValgrind}
+        getLastSshOutput={() => (sshConsoleRef.current ? sshConsoleRef.current.getLastServerOutput() : null)}
       />
     </SplitPane>
   );
 }
-// .SplitPane .Resizer {
-//   z-index: 9999 !important;
-//   pointer-events: auto !important;
-// }

@@ -284,7 +284,11 @@ const prepareDisplayContent = (
   return /\r?\n/.test(raw) ? "\n" : null;
 };
 
-const SshConsole: React.FC = () => {
+type SshConsoleHandle = {
+  getLastServerOutput: () => string | null;
+};
+
+const SshConsole = React.forwardRef<SshConsoleHandle, {}>((_props, ref) => {
   // Keep the socket in state so that it can be updated once GdbApi initialises.
   const [socket, setSocket] = React.useState<any>(GdbApi.getSocket());
   const [connectionState, setConnectionState] =
@@ -382,6 +386,16 @@ const SshConsole: React.FC = () => {
       ];
     });
   }, []);
+
+  // Expose an imperative handle so parent can read the last server output
+  React.useImperativeHandle(ref, () => ({
+    getLastServerOutput: () => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "server") return messages[i].content || null;
+      }
+      return null;
+    },
+  }), [messages]);
 
   const [shouldMaskNextInput, setShouldMaskNextInput] = React.useState(false);
 
@@ -577,15 +591,12 @@ const SshConsole: React.FC = () => {
     };
   }, [appendMessage, checkForPasswordPrompt, handleShellEvent, handleShellOutput, resetSanitizers, sanitizeEphemeral, sanitizeForDisplay, socket]);
 
-  // Emit a disconnect event when the component unmounts or the socket changes.
-  React.useEffect(() => {
-    if (!socket) {
-      return;
-    }
-    return () => {
-      socket.emit("ssh_disconnect");
-    };
-  }, [socket]);
+  // NOTE: previously we emitted `ssh_disconnect` when this component unmounted
+  // or when the socket changed. That caused navigating away from panels that
+  // mount/unmount this component (for example, the valgrind panel) to close the
+  // SSH session unexpectedly. Do not auto-disconnect on unmount — keep the
+  // session alive until the user explicitly clicks the "断开" button or the
+  // socket truly closes.
 
   React.useEffect(() => {
     if (connectionState !== "connecting") {
@@ -972,6 +983,6 @@ const SshConsole: React.FC = () => {
       </form>
     </div>
   );
-};
+});
 
 export default SshConsole;

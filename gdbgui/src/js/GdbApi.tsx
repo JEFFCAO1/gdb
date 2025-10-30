@@ -55,10 +55,23 @@ const GdbApi = {
 
     socket.on("connect", function() {
       log("connected");
+      try {
+        localStorage.setItem("client_id", socket.id);
+      } catch (e) {
+        void e; // non-fatal
+      }
       const queuedGdbCommands = store.get("queuedGdbCommands");
       if (queuedGdbCommands) {
         GdbApi.run_gdb_command(queuedGdbCommands);
         store.set("queuedGdbCommands", []);
+      }
+    });
+    socket.io.on("reconnect", () => {
+      // Update client id on reconnection (Socket.IO may assign a new id)
+      try {
+        localStorage.setItem("client_id", socket.id);
+      } catch (e) {
+        void e;
       }
     });
 

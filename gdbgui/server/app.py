@@ -51,7 +51,7 @@ app.config["remap_sources"] = {}
 manager = SessionManager()
 app.config["_manager"] = manager
 app.secret_key = binascii.hexlify(os.urandom(24)).decode("utf-8")
-socketio = SocketIO(manage_session=False)
+socketio = SocketIO(manage_session=False, kwargs={'ping_interval' : 90, 'pong_timeout': 10})
 
 
 ANSI_CSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
